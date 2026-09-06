@@ -53,13 +53,13 @@ learns which platform it is on.
 | Desktop (SDL2) | `SdlCanvas` | mouse, keyboard, wheel | ✅ live window, DPI-aware |
 | UEFI (GOP) | `GopCanvas` | **mouse + keyboard** | ✅ **live interactive loop** |
 | Bare metal (MMIO) | `FrameBuffer` | — | ✅ Cortex-M3, multi-frame |
-| Browser (WASM) | — | — | planned |
+| Browser (WASM) | `WebCanvas` | mouse + keyboard | ✅ **runs in a tab** |
 | Mobile (Android/iOS) | — | — | planned |
 
 The desktop and UEFI tiers render the full nine-widget panel **pixel-identically**; the only
 difference in the source is which `Canvas` is constructed.
 
-Reaching browser and mobile is *backend* work, not compiler work — `tauraroc --target`
+Reaching mobile is *backend* work, not compiler work — `tauraroc --target`
 already cross-compiles to `wasm`, `wasm-wasi`, `android-*`, `ios`, `macos-*`, `linux-*`,
 `windows-*`, `embedded-*` and `uefi-x64`.
 
@@ -68,6 +68,10 @@ already cross-compiles to `wasm`, `wasm-wasi`, `android-*`, `ios`, `macos-*`, `l
 Run everything from the repository root, so `toolkit.*` module paths resolve.
 
 ```sh
+# browser — WASM in a tab
+./scripts/build-web.ps1
+python3 -m http.server 8000 --directory build-web   # then open localhost:8000
+
 # hosted — fastest loop, writes a PPM
 tauraroc --run examples/quickstart/main.tr
 

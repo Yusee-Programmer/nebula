@@ -839,16 +839,23 @@ interactive tier, not a still image.
 
 Three findings from Phase 1b, each recorded next to the code because each presents as
 something other than what it is — see `render_live.tr`'s header and the UEFI section above:
-a module-level `mut x = SomeClass.init()` initializes BEFORE `tauraro_heap_init` and
-silently stores a null; adding a USB device reshuffles OVMF's boot order onto the Shell
-(fixed with a generated `startup.nsh`, which also usefully *prints* crash reasons);
+module-level `mut` initializers DO NOT RUN AT ALL on freestanding targets, so a global
+`SomeClass.init()` is permanently null AND a scalar with a non-zero default is silently zero;
+adding a USB device reshuffles OVMF's boot order onto the Shell (fixed with a generated
+`startup.nsh`, which also usefully *prints* crash reasons);
 and painting straight to the GOP scanout means a screenshot catches a half-drawn frame,
 which cost two rounds of chasing layout bugs that did not exist.
 
-**Phase 2 — the browser backend.** The biggest widening of reach, and it tests the
-portability claim against a platform maximally unlike the working ones. WASM `Canvas` into
-linear memory, JS blits via `ImageData`, DOM events into an exported entry point. *Verify the
-interop shape with a compiling probe first* — that is the main unknown.
+**Phase 2 — the browser backend. ✅ DONE (2026-09-06).** `toolkit/render/web/canvas.tr` +
+`examples/web_demo/` + `scripts/build-web.ps1`. Nebula renders in a browser tab from the same
+engine every other tier runs. Build: `--target wasm --freestanding --emit c`, then
+`zig build-exe -target wasm32-freestanding -fno-entry -rdynamic`. The result imports NOTHING
+(no WASI), so the host page needs only `WebAssembly.instantiate` with an empty import object.
+Pixels cross the boundary by not crossing it — Tauraro renders into WASM linear memory and JS
+wraps those exact bytes in an `ImageData`. ABI: `int`/`usize` are i64 (BigInt in JS),
+`Pointer[T]` is i32 (Number). The one per-backend difference is byte order: `ImageData` is
+[R,G,B,A] where every other backend wants [B,G,R,X], so `WebCanvas` repacks — getting that
+wrong silently swaps red and blue.
 
 **Phase 3 — the `nebula` CLI.** `init` / `dev` / `run --<target>` / `build`. Generates each
 tier's entry point including the ~80-line bump allocator currently copy-pasted into four

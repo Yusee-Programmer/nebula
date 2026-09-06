@@ -278,7 +278,7 @@ redrawing every frame, double-buffered. Delivered as `toolkit/platform/arena.tr`
 arena replacing four copy-pasted allocators) and `boot_interactive.zig` (the pointer and
 keyboard protocols the turnkey UEFI target cannot reach).
 
-### Phase 2 — The browser backend
+### Phase 2 — The browser backend ✅ DONE (2026-09-06)
 
 The single biggest widening of reach, and it validates the portability claim against a
 platform maximally unlike the ones already working.
@@ -287,7 +287,10 @@ platform maximally unlike the ones already working.
 - DOM events → an exported Tauraro entry point.
 - Verify the JS interop shape first with a compiling probe — this is the main unknown.
 
-*Exit:* `examples/widgets_demo` running in a browser tab, pixel-comparable to desktop.
+*Exit:* ✅ met. `examples/web_demo` runs in a browser tab, verified headlessly in node
+(0 imports, frames rendered, arena steady) and by dumping the pixel buffer to PPM. The
+interop was settled by probe first, as planned — see CLAUDE.md for the resulting flags and
+ABI notes, and for a correction it forced to a Phase 1b claim.
 
 ### Phase 3 — The `nebula` CLI
 
@@ -333,7 +336,7 @@ Stated plainly, because each one can change a phase's shape.
 | # | Question | Why it matters | How to settle it |
 |---|---|---|---|
 | 1 | Can Tauraro list directories and spawn processes? | Decides whether `nebula` is a Tauraro binary or a Tauraro core + shell wrapper. Blocks Phase 3's shape. | A 20-line compiling probe. Do this before designing the CLI. |
-| 2 | What does WASM interop look like — can Tauraro export functions to JS and import from it? | Blocks Phase 2 entirely. | Compiling probe against `--target wasm`. |
+| 2 | ~~What does WASM interop look like?~~ | ✅ **SETTLED (2026-09-06).** Exports need `--freestanding` + `-rdynamic`; imports are zero (no WASI); `int`/`usize` are i64/BigInt, `Pointer[T]` is i32/Number; `__heap_base` gives the arena its base. | Probe. Done. |
 | 3 | Does SDL2 actually build for `android-arm64` / `ios` through `tauraroc`? | Decides whether Phase 5 is days or weeks. | Try the cross-build early; it is cheap to test. |
 | 4 | Is `--no-heap` viable for the smallest embedded targets? | The engine currently uses `List`/`Dict` throughout, so probably not without a parallel data path. Affects how far "embedded" reaches. | Compile the toolkit with `--no-heap` and read the errors. |
 | 5 | What is `templa`'s syntax and integration surface? | Shapes the expansion phase's interface. | Ask, before building the slot. |

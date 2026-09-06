@@ -31,7 +31,7 @@ language by actually building its compiler and compiling test programs against i
 reading documentation alone. Treat facts marked **verified** as tested; everything else is from
 docs/README and should be spot-checked before being relied on for anything load-bearing.
 
-**`tau_bugs.txt`** at the repo root is the running log of confirmed Tauraro compiler/SDK/docs
+**`bugs.txt`** at the repo root is the running log of confirmed Tauraro compiler/SDK/docs
 defects, each reduced to a minimal repro. Check it before spending time re-diagnosing a hang or
 a confusing error — several of the entries there cost hours the first time.
 

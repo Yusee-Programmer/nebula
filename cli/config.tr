@@ -1,0 +1,151 @@
+# cli.config — nebula.conf, and the target table.
+#
+# The config format is deliberately trivial: `key = value`, one per line, `#`
+# comments, everything a string until someone asks for it as an int. Tauraro
+# has no TOML or JSON parser, and adding one to read six settings would be a
+# larger dependency than the thing it configures.
+
+from io.file import File
+from string.str import Str
+
+pub class Config:
+    pub name:    str
+    pub width:   int
+    pub height:  int
+    pub entry:   str   # the .ui file, relative to the project root
+    pub handlers: str  # the .tr file exporting register_all(), or "" for none
+    pub bg:      str   # page background, as a #RRGGBB literal
+    pub ok:      bool
+    pub err:     str
+
+extend Config:
+    pub def defaults() -> Config:
+        mut c = Config()
+        c.name = "nebula-app"
+        c.width = 900
+        c.height = 560
+        c.entry = "app/page.ui"
+        c.handlers = "app/page.tr"
+        c.bg = "#0F172A"
+        c.ok = true
+        c.err = ""
+        return c
+
+    pub def to_str(self) -> str:
+        return self.name + " " + self.width.to_str() + "x" + self.height.to_str() + " entry=" + self.entry
+
+# Parses one `key = value` line into the config. Unknown keys are ignored
+# rather than fatal, matching how the style system treats unknown class
+# tokens: a config from outside the build must never be able to halt the
+# tool, and a typo that silently does nothing is easier to diagnose than a
+# stack trace.
+def apply_line(c: Config, line: str) -> void:
+    mut s = Str.trim(line)
+    if s == "":
+        return
+    if Str.starts_with(s, "#"):
+        return
+    mut eq = Str.index_of(s, "=")
+    if eq <= 0:
+        return
+    mut key = Str.trim(Str.slice(s, 0, eq))
+    mut val = Str.trim(Str.slice(s, eq + 1, Str.len(s)))
+    # Strip one layer of surrounding quotes, so both `name = app` and
+    # `name = "my app"` work and a value can contain spaces.
+    mut n = Str.len(val)
+    if n >= 2:
+        if Str.starts_with(val, "\"") and Str.slice(val, n - 1, n) == "\"":
+            val = Str.slice(val, 1, n - 1)
+
+    if key == "name":
+        c.name = val
+    elif key == "width":
+        if Str.is_digit(val):
+            c.width = Str.parse_int(val)
+    elif key == "height":
+        if Str.is_digit(val):
+            c.height = Str.parse_int(val)
+    elif key == "entry":
+        c.entry = val
+    elif key == "handlers":
+        c.handlers = val
+    elif key == "bg":
+        c.bg = val
+
+pub def load_config(path: str) -> Config:
+    mut c = Config.defaults()
+    mut text = File.read_text(path)
+    if text == "":
+        c.ok = false
+        c.err = "no " + path + " here -- run `nebula init <name>` first, or cd into a project"
+        return c
+    mut lines = Str.split(text, "\n")
+    mut i = 0
+    while i < len(lines):
+        apply_line(c, lines[i])
+        i = i + 1
+    return c
+
+# --- targets ---------------------------------------------------------------
+#
+# One place that knows the platform list, so `nebula run --wat` can say what
+# it should have been rather than failing obscurely three layers down.
+
+pub def target_hosted() -> int:
+    return 0
+
+pub def target_desktop() -> int:
+    return 1
+
+pub def target_web() -> int:
+    return 2
+
+pub def target_uefi() -> int:
+    return 3
+
+pub def target_bare() -> int:
+    return 4
+
+pub def target_unknown() -> int:
+    return 0 - 1
+
+pub def target_from_name(s: str) -> int:
+    if s == "hosted":
+        return target_hosted()
+    if s == "desktop":
+        return target_desktop()
+    if s == "web":
+        return target_web()
+    if s == "uefi":
+        return target_uefi()
+    if s == "bare":
+        return target_bare()
+    return target_unknown()
+
+pub def target_name(t: int) -> str:
+    if t == target_hosted():
+        return "hosted"
+    if t == target_desktop():
+        return "desktop"
+    if t == target_web():
+        return "web"
+    if t == target_uefi():
+        return "uefi"
+    if t == target_bare():
+        return "bare"
+    return "?"
+
+pub def all_target_names() -> str:
+    return "hosted, desktop, web, uefi, bare"
+
+# Freestanding targets have no filesystem, so their UI markup must be baked
+# into the binary at build time rather than read at runtime. This one
+# predicate drives that difference everywhere it matters.
+pub def is_freestanding(t: int) -> bool:
+    if t == target_web():
+        return true
+    if t == target_uefi():
+        return true
+    if t == target_bare():
+        return true
+    return false

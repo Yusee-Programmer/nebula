@@ -10,6 +10,7 @@ build-web*/
 *.efi
 *_link.log
 *_build_log.txt
+*.txt
 
 # SDL2's runtime DLL -- a redistributable, not source; build-desktop.ps1
 # copies it from the local mingw64 install next to every build automatically.

@@ -1,0 +1,115 @@
+# toolkit.render.web — the browser Canvas backend.
+#
+# The fifth backend, and the one that best tests the portability claim: a
+# browser shares nothing with a UEFI framebuffer except the idea of a rectangle
+# of pixels. It still costs only this file plus an input source, because
+# everything above the pixel -- parser, style, layout, interpreter,
+# rasterizer, font, widgets -- never learns which platform it is on.
+#
+# ## How the pixels reach the screen
+#
+# WASM linear memory is directly visible to JavaScript. So there is no
+# "sending" step at all: Tauraro renders into a buffer inside its own memory,
+# and JS wraps those exact bytes in a Uint8ClampedArray and hands them to
+# `ctx.putImageData`. Zero copies on the Tauraro side, and the whole transport
+# is one `new ImageData(...)` in the host page.
+#
+# This is the same backbuffer shape the UEFI tier arrived at (see
+# examples/uefi_demo/render_live.tr) -- draw into RAM, present once -- except
+# here the "present" is done by the host rather than by us.
+#
+# ## The one real difference from every other backend: byte order
+#
+# `Canvas` colors are 0x00RRGGBB, which every other backend can write to its
+# framebuffer verbatim -- on little-endian hardware that lands in memory as
+# bytes [B, G, R, X], and both GOP and SDL happen to want exactly that.
+#
+# `ImageData` does NOT. It is defined as bytes [R, G, B, A] in memory order.
+# So this backend repacks each pixel to 0xAABBGGRR before storing it, which
+# little-endian then lays out as [R, G, B, A]. Alpha is forced opaque: the
+# toolkit has no alpha channel anywhere (antialiasing is resolved before the
+# pixel write -- see RASTERIZER.md), so a transparent pixel would be a bug,
+# not a feature.
+#
+# Getting this wrong does not crash; it silently swaps red and blue, which is
+# exactly the kind of thing that looks like a palette bug three layers away.
+
+from toolkit.render.canvas import Canvas
+from toolkit.types import red_of, green_of, blue_of
+
+pub class WebCanvas implements Canvas:
+    pub px: Pointer[u32]
+    pub w:  int
+    pub h:  int
+
+extend WebCanvas:
+    # `px` is a buffer inside WASM linear memory, allocated by the caller and
+    # handed to JS by byte offset. There is no pitch parameter: unlike a
+    # firmware framebuffer, we allocated this ourselves, so rows are exactly
+    # `w` pixels with no padding.
+    pub def init(px: Pointer[u32], w: int, h: int) -> WebCanvas:
+        mut c = WebCanvas()
+        c.px = px
+        c.w = w
+        c.h = h
+        return c
+
+    pub def width(self) -> int:
+        return self.w
+
+    pub def height(self) -> int:
+        return self.h
+
+    # 0x00RRGGBB -> 0xFFBBGGRR, so the bytes land as [R, G, B, A]. See the
+    # header for why this backend is the only one that has to do this.
+    def rgba(self, color: int) -> u32:
+        mut r = red_of(color)
+        mut g = green_of(color)
+        mut b = blue_of(color)
+        return (0xFF000000 + b * 65536 + g * 256 + r) as u32
+
+    pub def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+
+        mut x0 = x
+        mut y0 = y
+        mut x1 = x + w
+        mut y1 = y + h
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        if x0 >= x1:
+            return
+        if y0 >= y1:
+            return
+
+        mut packed = self.rgba(color)
+        unsafe:
+            mut yy = y0
+            while yy < y1:
+                mut row = yy * self.w
+                mut xx = x0
+                while xx < x1:
+                    self.px.offset(row + xx).write(packed)
+                    xx = xx + 1
+                yy = yy + 1
+
+    pub def set_pixel(self, x: int, y: int, color: int) -> void:
+        if x < 0:
+            return
+        if y < 0:
+            return
+        if x >= self.w:
+            return
+        if y >= self.h:
+            return
+        unsafe:
+            self.px.offset(y * self.w + x).write(self.rgba(color))

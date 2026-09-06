@@ -4,6 +4,7 @@ build/
 build-bare*/
 build-uefi*/
 build-desktop*/
+build-web*/
 *.elf
 *.ld
 *.efi

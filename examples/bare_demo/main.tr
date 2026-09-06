@@ -23,49 +23,23 @@ from toolkit.ui.ast import count_nodes, tree_depth
 from toolkit.ui.interp import Interpreter, render_to, register_handler
 from toolkit.render.bare.framebuffer import FrameBuffer
 
-# ---- Bump allocator over the MPS2-AN385 SRAM window ----
+# ---- Memory: the shared arena over the MPS2-AN385 SRAM window ----
 #
-# Header-based design (2026-09-04), replacing the earlier _last_ptr-only
-# version. That version tracked only the SINGLE most-recently-allocated
-# block; reallocing anything OLDER than that fell back to a "copy what's
-# available, clamped to _heap_next" path that could only copy up to
-# _heap_next - pu bytes -- if the new size n was bigger than that, the tail
-# of the new block was left UNINITIALISED (never written, not zeroed
-# either). That uninitialised tail is exactly consistent with tau_bugs.txt
-# #13's unroot-caused hang: specific colors/canvas widths shift allocation
-# sizes enough to hit this case, and if the garbage tail is later read as a
-# null-terminated string (print()'s own path), a `while byte != 0` loop can
-# run off the end of the SRAM window into a bus fault with no handler --
-# silent hang, zero further UART output, exactly the symptom reported.
+# The ~80 lines that used to live here (and, verbatim, in three UEFI programs)
+# now live in toolkit/platform/arena.tr -- one copy to be correct, and the
+# shape the `nebula` CLI will generate. See that file for the four invariants
+# every bump allocator here has to satisfy, all four of which were learned the
+# hard way and each of which presents as a silent hang rather than an error.
 #
-# The fix: an 8-byte size header immediately before every returned block, so
-# heap_realloc can always recover a pointer's TRUE allocated size and copy
-# the FULL old contents -- for ANY block, not just the most recent one.
-# Every realloc must still satisfy all four of:
-#   a) COPY the old bytes (now always the true old size, not a clamped guess).
-#   b) GROW IN PLACE when the block is the newest allocation (O(1) instead of
-#      O(n^2) for a List built by repeated append).
-#   c) NEVER move _heap_next backwards on a shrink (the freed tail must never
-#      be handed to the next allocation while this block is still live).
-#   d) NEVER return a zero-length block (round up, minimum 8).
+# The hooks themselves must stay in the program: @allocator and friends are
+# per-program, and --freestanding #errors at C-compile time without them.
 
-mut _heap_next: usize = 0x20080000 as usize
-
-def _heap_round(n: usize) -> usize:
-    mut r = n
-    if r < (8 as usize):
-        r = 8 as usize
-    return ((r + (7 as usize)) / (8 as usize)) * (8 as usize)
+from toolkit.platform.arena import arena_init, arena_alloc, arena_realloc, arena_calloc
+from toolkit.platform.arena import arena_mark, arena_release, arena_used
 
 @allocator
 def heap_alloc(n: usize) -> Pointer[u8]:
-    unsafe:
-        mut sz = _heap_round(n)
-        mut hdr = _heap_next as Pointer[usize]
-        hdr.write(sz)
-        mut p = (_heap_next + (8 as usize)) as Pointer[u8]
-        _heap_next = _heap_next + (8 as usize) + sz
-        return p
+    return arena_alloc(n)
 
 @free
 def heap_free(p: Pointer[u8]):
@@ -73,46 +47,11 @@ def heap_free(p: Pointer[u8]):
 
 @realloc
 def heap_realloc(p: Pointer[u8], n: usize) -> Pointer[u8]:
-    unsafe:
-        mut pu = p as usize
-        if pu == (0 as usize):
-            return heap_alloc(n)
-
-        mut old_hdr = (pu - (8 as usize)) as Pointer[usize]
-        mut old_sz = old_hdr.read()
-        mut sz = _heap_round(n)
-
-        if sz <= old_sz:
-            return p   # (c) shrink in place, never move _heap_next backward
-
-        if pu + old_sz == _heap_next:
-            # (b) grow in place: this block is the newest allocation, so the
-            # bump pointer sits immediately after it -- just extend the arena.
-            _heap_next = _heap_next + (sz - old_sz)
-            old_hdr.write(sz)
-            return p
-
-        # General case: an older block. old_sz is now the TRUE size (read
-        # from its own header, not clamped/guessed), so the full copy is
-        # always in-bounds and never leaves an uninitialised tail.
-        mut fresh = heap_alloc(n)
-        mut i: usize = 0 as usize
-        while i < old_sz:
-            fresh.offset(i).write(p.offset(i).read())
-            i = i + (1 as usize)
-        return fresh
+    return arena_realloc(p, n)
 
 @calloc
 def heap_calloc(n: usize, sz: usize) -> Pointer[u8]:
-    unsafe:
-        mut total = n * sz
-        mut q = heap_alloc(total)
-        mut rounded = _heap_round(total)
-        mut i: usize = 0 as usize
-        while i < rounded:
-            q.offset(i).write(0 as u8)
-            i = i + (1 as usize)
-        return q
+    return arena_calloc(n, sz)
 
 # ---- print() sink: CMSDK UART0 ----
 @output
@@ -146,6 +85,13 @@ extend OkHandler:
 
 @entry
 def kernel_main():
+    # The arena has to be initialised before ANY allocation, which means
+    # before the parser runs. 0x20080000 is the MPS2-AN385 SRAM window; the
+    # size is deliberately generous, since the bound exists to turn a runaway
+    # allocation into a null pointer rather than to model real SRAM.
+    unsafe:
+        arena_init(0x20080000 as Pointer[u8], 0x00400000 as usize)
+
     # The UI description, compiled into the image because there is no disk to
     # read it from. Identical in form to examples/hosted_demo/app.ui.
     # A <text> row proves the baked bitmap font (toolkit/text/) renders
@@ -155,10 +101,11 @@ def kernel_main():
     #
     # Colors and the exact canvas size here are deliberately pinned to a
     # combination confirmed to complete on real hardware emulation -- see
-    # tau_bugs.txt #13. Certain other packed RGB values (amber, violet, mist)
-    # and certain canvas widths (96 hangs, 88 does not, same everything else)
-    # hang deterministically on this exact target for reasons not yet
-    # root-caused. Bisect any change to either before trusting it here.
+    # CLAUDE.md's bare-metal notes. Certain other packed RGB values (amber,
+    # violet, mist) and certain canvas widths (96 hangs, 88 does not, same
+    # everything else) hang deterministically on this exact target for
+    # reasons not yet root-caused. Bisect any change to either before
+    # trusting it here.
     mut src = "<panel \"flex-col p-0.5 gap-0.5 bg-slate-800\">\n  <panel \"flex-row gap-0.5 h-5\">\n    <panel \"bg-red grow\" />\n    <panel \"bg-green grow\" />\n    <panel \"bg-blue grow\" />\n  </panel>\n  <text \"text-white\">BARE METAL</text>\n  <panel \"flex-row gap-0.5 h-3\" @on_click(on_ok)>\n    <panel \"bg-blue grow\" />\n    <panel \"bg-red w-3.5\" />\n  </panel>\n</panel>\n"
 
     mut p = UiParser.init()
@@ -173,14 +120,42 @@ def kernel_main():
 
     # 88px wide: enough for "BARE METAL" (10 chars * 8px + 2*2px padding =
     # 84px) with a hair of margin, and empirically confirmed to complete
-    # (96px, otherwise identical, hangs -- see tau_bugs.txt #13). 56 tall
-    # fits the color row + text row + button row + padding/gaps
-    # (2+20+2+14+2+12+2 = 54).
+    # (96px, otherwise identical, hangs). 56 tall fits the color row + text
+    # row + button row + padding/gaps (2+20+2+14+2+12+2 = 54).
     mut fb = FrameBuffer.init(88, 56, 0x000000)
-    render_to(it, tree, fb)
 
-    # Hit-testing on bare metal, before any input driver exists. y=46 lands
-    # in the button row, which now sits below the added text row.
+    # --- per-frame arena reset (proposal v3, phase 1a) ------------------
+    #
+    # Frame 0 is the warm-up: it resolves every class string into the
+    # StyleCache, so the cache's Dict never grows again. The mark is taken
+    # AFTER it, because a Dict that reallocs above the mark would have its
+    # storage freed out from under it on the first release. See
+    # toolkit/platform/arena.tr for the full rule.
+    render_to(it, tree, fb)
+    mut warm = arena_used()
+    mut frame_mark = arena_mark()
+
+    # Three more frames. If the reset works, arena usage after each is
+    # IDENTICAL -- that equality is the whole proof, and it is what made this
+    # tier single-frame until now.
+    mut used_1: usize = 0 as usize
+    mut used_2: usize = 0 as usize
+    mut used_3: usize = 0 as usize
+
+    arena_release(frame_mark)
+    render_to(it, tree, fb)
+    used_1 = arena_used()
+
+    arena_release(frame_mark)
+    render_to(it, tree, fb)
+    used_2 = arena_used()
+
+    arena_release(frame_mark)
+    render_to(it, tree, fb)
+    used_3 = arena_used()
+
+    # Hit-testing against the LAST frame's tree, which is still live: dispatch
+    # must run after a render and before the next release.
     mut on_button = it.dispatch(Event.click(20, 46))
     mut on_padding = it.dispatch(Event.click(1, 1))
 
@@ -190,4 +165,9 @@ def kernel_main():
     print("# nodes=" + count_nodes(tree).to_str() + " depth=" + tree_depth(tree).to_str())
     print("# dispatch button=" + on_button.to_str() + " padding=" + on_padding.to_str() + " hits=" + _ok_hits.to_str())
     print("# " + it.stats())
+    print("# arena warm=" + warm.to_str() + " f1=" + used_1.to_str() + " f2=" + used_2.to_str() + " f3=" + used_3.to_str())
+    if used_1 == used_2 and used_2 == used_3:
+        print("# PER-FRAME RESET OK -- 4 renders, steady-state memory")
+    else:
+        print("# PER-FRAME RESET BROKEN -- usage grew across frames")
     p.report()

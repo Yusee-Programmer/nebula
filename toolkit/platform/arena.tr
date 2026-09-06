@@ -1,0 +1,155 @@
+# toolkit.platform.arena — the bump arena every freestanding tier runs on,
+# with per-frame mark/release.
+#
+# Until 2026-09-06 this code was COPY-PASTED into four programs
+# (examples/bare_demo/main.tr and three examples/uefi_demo/*.tr), each about
+# 80 lines, each having to re-derive the same four invariants. It lives here
+# now so there is one copy to be correct, and so the `nebula` CLI can generate
+# a tier entry point that just delegates to it.
+#
+# A program still has to declare its own @allocator/@free/@realloc/@calloc
+# hooks -- those are per-program, and --freestanding #errors at C-compile time
+# without them -- but each hook is now a one-line forward into this module:
+#
+#     @allocator
+#     def heap_alloc(n: usize) -> Pointer[u8]:
+#         return arena_alloc(n)
+#
+# ## The four invariants (hard-won; see CLAUDE.md's bare-metal notes)
+#
+#   a) realloc must COPY the old bytes -- the true old size, read from the
+#      block's own header, never a clamped guess. Getting this wrong presents
+#      as "parse: ok, exactly one node" or as an uninitialised tail that later
+#      reads as a runaway string and bus-faults with no handler installed.
+#   b) GROW IN PLACE when the block is the newest allocation, or repeated
+#      List.append is O(n^2) and an emulated Cortex-M never finishes a frame.
+#   c) NEVER move the bump pointer backwards on a shrink, or the freed tail is
+#      handed out while the block is still live.
+#   d) NEVER return a zero-length block; round up, minimum 8, or two live
+#      objects share an address.
+#
+# ## Per-frame reset (the reason this module exists now)
+#
+# free() is a no-op -- that is what a bump arena is -- so before this, every
+# freestanding tier was strictly SINGLE-FRAME: a second render would allocate
+# a second LayoutBox tree and never reclaim the first. mark()/release() make
+# the whole frame's garbage reclaimable at once:
+#
+#     render_to(it, tree, canvas)      # warm the style cache FIRST -- see below
+#     mut frame = arena_mark()
+#     while running:
+#         arena_release(frame)         # last frame's tree, in one instruction
+#         render_to(it, tree, canvas)
+#         it.dispatch(...)             # uses THIS frame's tree, still live
+#         canvas.present()
+#
+# **Order matters, in two ways that are easy to get wrong:**
+#
+# 1. `dispatch()` hit-tests against `Interpreter.root`, which is this frame's
+#    tree. It must run after render and before the next release.
+# 2. Take the mark AFTER one warm-up render, not before. StyleCache is a Dict
+#    that grows as it meets new class strings; if it grows *above* the mark,
+#    release() frees storage the cache still points at. One warm-up render
+#    resolves every class string in the markup, so every later frame is a pure
+#    cache hit and the Dict never reallocs again. The cost is one leaked tree.
+
+# Absolute addresses, not pointers: pointer arithmetic in Tauraro wants
+# .offset() on a typed pointer, and the arena is untyped byte space.
+mut _next: usize = 0 as usize
+mut _end:  usize = 0 as usize
+mut _base: usize = 0 as usize
+
+# Every block is preceded by an 8-byte header holding its rounded size, so
+# realloc can always recover a block's TRUE size (invariant (a)) for ANY
+# block, not just the most recent one.
+def hdr_size() -> usize:
+    return 8 as usize
+
+pub def arena_init(base: Pointer[u8], size: usize) -> void:
+    unsafe:
+        _base = base as usize
+        _next = base as usize
+        _end = (base as usize) + size
+
+def round_up(n: usize) -> usize:
+    mut r = n
+    if r < (8 as usize):
+        r = 8 as usize     # (d) never a zero-length block
+    return ((r + (7 as usize)) / (8 as usize)) * (8 as usize)
+
+pub def arena_alloc(n: usize) -> Pointer[u8]:
+    unsafe:
+        mut sz = round_up(n)
+        # Out of arena. There is no error channel back from an @allocator
+        # hook, so this returns null and the caller crashes on first write --
+        # size the pool generously rather than relying on recovery here.
+        if _next + hdr_size() + sz > _end:
+            return 0 as Pointer[u8]
+        mut hdr = _next as Pointer[usize]
+        hdr.write(sz)
+        mut p = (_next + hdr_size()) as Pointer[u8]
+        _next = _next + hdr_size() + sz
+        return p
+
+pub def arena_realloc(p: Pointer[u8], n: usize) -> Pointer[u8]:
+    unsafe:
+        mut pu = p as usize
+        if pu == (0 as usize):
+            return arena_alloc(n)
+
+        mut old_hdr = (pu - hdr_size()) as Pointer[usize]
+        mut old_sz = old_hdr.read()
+        mut sz = round_up(n)
+
+        if sz <= old_sz:
+            return p                       # (c) shrink in place
+
+        if pu + old_sz == _next:           # (b) grow in place: newest block
+            if _next + (sz - old_sz) > _end:
+                return 0 as Pointer[u8]
+            _next = _next + (sz - old_sz)
+            old_hdr.write(sz)
+            return p
+
+        mut fresh = arena_alloc(n)         # (a) copy the TRUE old size
+        mut i: usize = 0 as usize
+        while i < old_sz:
+            fresh.offset(i).write(p.offset(i).read())
+            i = i + (1 as usize)
+        return fresh
+
+pub def arena_calloc(n: usize, sz: usize) -> Pointer[u8]:
+    unsafe:
+        mut total = n * sz
+        mut q = arena_alloc(total)
+        mut rounded = round_up(total)
+        mut i: usize = 0 as usize
+        while i < rounded:
+            q.offset(i).write(0 as u8)
+            i = i + (1 as usize)
+        return q
+
+# --- per-frame reset -------------------------------------------------------
+
+# Current high-water position. Everything allocated after this call is
+# reclaimed by the matching arena_release().
+pub def arena_mark() -> usize:
+    return _next
+
+# Reclaims every allocation made since `m` was taken, in one assignment.
+# Anything still referenced above `m` becomes a dangling pointer -- see this
+# file's header for the two ordering rules that keep that from happening.
+# Ignores a mark below the arena base or above the current position, so a
+# stale or uninitialised mark cannot corrupt the arena.
+pub def arena_release(m: usize) -> void:
+    if m < _base:
+        return
+    if m > _next:
+        return
+    _next = m
+
+pub def arena_used() -> usize:
+    return _next - _base
+
+pub def arena_capacity() -> usize:
+    return _end - _base

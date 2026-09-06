@@ -1,12 +1,32 @@
 # Project memory — read this first
 
-This is a from-scratch project: a declarative, Tailwind-style UI toolkit written in the
-**Tauraro** language (github.com/tauraro/tauraro), interpreted at runtime rather than compiled
-in, targeting both a hosted dev loop and eventually bare-metal / OS-level rendering. Full
-rationale and phased plan: `docs/proposal/proposal-v2-runtime-interpreter.md` — read that before
-writing code, it's the actual spec this scaffold was generated from.
+**Nebula is a cross-platform GUI engine with its own declarative UI syntax, written in the
+Tauraro language** (github.com/tauraro/tauraro), interpreted at runtime rather than compiled
+in. The goal is **write once, run anywhere: browser, desktop, mobile, embedded, bare metal,
+UEFI — up to and including an operating system's own interface.**
 
-Everything below is what a prior session (Claude, in Cowork) verified about the Tauraro
+Full rationale, current status and the phased plan:
+**`docs/proposal/proposal-v3-cross-platform-engine.md`** — read that before writing code, it
+is the current spec. (`proposal-v2-runtime-interpreter.md` is superseded: it framed this as a
+bare-metal toolkit with a dev loop attached, which turned out to be too narrow a reading of
+what the architecture supports.)
+
+**The load-bearing architectural claim:** everything above the pixel is platform-agnostic, and
+a new platform costs exactly one `Canvas` implementation (four methods —
+`width`/`height`/`fill_rect`/`set_pixel`, no alpha, no read-back) plus an input source. Parser,
+style resolution, layout, interpreter, rasterizer, font and all nine widgets never learn which
+platform they are on. This is verified, not aspirational: four backends sharing no code below
+`Canvas` are running today, and the UEFI and desktop renders are pixel-identical.
+
+**And it is reachable everywhere**, because `tauraroc --target` already cross-compiles to
+`wasm`, `wasm-wasi`, `android-*`, `ios`, `macos-*`, `linux-*`, `windows-*`, `embedded-*` and
+`uefi-x64`. Browser and mobile are *backend* work, not compiler work. Run `tauraroc --help` to
+confirm the list.
+
+**Templating: use `templa`** (the project's own engine), not Jinja — Jinja was proposed and
+explicitly rejected on 2026-09-06. Integration is deferred; keep the expansion step pluggable.
+
+Everything below is what prior sessions verified about the Tauraro
 language by actually building its compiler and compiling test programs against it — not by
 reading documentation alone. Treat facts marked **verified** as tested; everything else is from
 docs/README and should be spot-checked before being relied on for anything load-bearing.
@@ -800,40 +820,63 @@ host-painted widgets then read their origin back off the laid-out tree
 (`it.root.children[0].x/y`) rather than recomputing the centering — so if the panel's size or the
 centering rule changes, they follow instead of silently drifting.
 
-## What's next, highest value first
+## What's next — the plan
 
-1. **A UEFI input driver** — the one thing standing between `render_widgets.tr` and a real
-   login screen (the user's stated goal from an earlier session; they previously shipped a Rust
-   DXE driver doing exactly this). Everything downstream of an event already exists and is proven
-   on three other tiers: `EventHandler` dispatch, hit-testing, every widget's `click_inside` /
-   `handle_key`, and `toolkit/ui/textinput.tr`. What's missing is upstream — a **UEFI Simple
-   Pointer / Simple Text Input** protocol read, turned into `Event.click(x,y)` / `Event.key(code)`
-   and fed to the existing `it.dispatch()`. That plus a per-frame arena reset (#2) turns the
-   current static frame into a live screen. `render_interactive.tr` is the pattern to follow;
-   `boot.zig` (not the turnkey target) is the reference for reaching protocols beyond GOP.
+Full detail and rationale in `docs/proposal/proposal-v3-cross-platform-engine.md` §5. Ordered
+by value delivered per unit of risk, not by dependency convenience. Each phase is
+independently shippable and leaves the repo working.
 
-2. **Per-frame arena reset (proposal 5.6).** The bump allocator never frees on any freestanding
-   tier, so today's demos are strictly single-frame. Needed before any animation, redraw, or
-   input-driven live-reload loop on bare metal or UEFI.
+**Phase 1 — unblock the freestanding tiers.** The difference between a rendering demo and a
+GUI engine, and the highest-value work available.
+1. **Per-frame arena reset.** The bump allocator never frees, so UEFI/bare-metal/embedded are
+   strictly single-frame. A mark/release turns them into real interactive tiers. Blocks
+   animation, redraw, and everything data-driven on three of six platform families.
+2. **A UEFI input driver.** Simple Pointer + Simple Text Input → `Event`. Everything
+   downstream already exists and is proven on desktop: `EventHandler` dispatch, hit-testing,
+   every widget's `click_inside`/`handle_key`, `textinput.tr`. **This produces the login
+   screen.** `render_interactive.tr` is the pattern; `boot.zig` is the reference for reaching
+   protocols beyond GOP.
 
-3. **Gamma-correct blending** (`RASTERIZER.md` §3). Coverage is a linear quantity but the
-   framebuffer holds sRGB, so blending in sRGB directly makes every antialiased edge slightly too
-   heavy — black at 50% coverage over white should encode to 188, not 128. The fix is an
-   sRGB→linear / linear→sRGB LUT pair (~1.5KB, generated alongside the font atlas), plus a
-   separate contrast-reshaped coverage LUT for text specifically, since physically-correct linear
-   blending makes small text look thin. Deliberately NOT done in the 2026-09-05 pass: it changes
-   every blended pixel on all four tiers at once, and the Cortex-M tier has a known
-   colour-value-dependent hang (`tau_bugs.txt` #13) that would make a regression there hard to
-   attribute. Do it with a per-tier before/after PPM diff in hand.
+**Phase 2 — the browser backend.** The biggest widening of reach, and it tests the
+portability claim against a platform maximally unlike the working ones. WASM `Canvas` into
+linear memory, JS blits via `ImageData`, DOM events into an exported entry point. *Verify the
+interop shape with a compiling probe first* — that is the main unknown.
 
-4. **`render_to()` still cannot paint into a sub-rect** — `layout_tree` always sizes the root to
-   the whole canvas, so anything that wants a UI tree inside a region has to be host-painted
-   instead (see the widgets_demo finding above). A viewport parameter would remove that whole
-   class of workaround.
+**Phase 3 — the `nebula` CLI.** `init` / `dev` / `run --<target>` / `build`. Generates each
+tier's entry point including the ~80-line bump allocator currently copy-pasted into four
+programs, and absorbs the four PowerShell scripts and their flag folklore. *Settle whether
+Tauraro can list directories and spawn processes before designing this* — it decides whether
+the CLI is a Tauraro binary or a Tauraro core plus a shell wrapper.
 
-5. **Diffing (Phase 5)** — re-render currently repaints everything.
-6. **Transport (Phase 8)** — hosted is a file read today; there is no watch loop and no UART path,
-   and now also no "read the next UI file from an EFI System Partition" path for UEFI.
+**Phase 4 — app structure.** Folder-based screens resolved at BUILD time (no filesystem on
+freestanding tiers, so codegen emits markup as string constants), `layout.ui` composition,
+`goto:` navigation — which needs no grammar change, since the AST already stores handler names
+as opaque strings — and hot reload on `nebula dev`.
+
+**Phase 5 — mobile.** Android and iOS through the existing `SdlCanvas`; plausibly mostly build
+configuration, since SDL2 supports both and the bindings already exist.
+
+**Phase 6 — engine depth**, in demand order: multiple font sizes (currently the most visible
+authoring limit — `text-lg` parses and does nothing), gamma-correct blending
+(`RASTERIZER.md` §3), sub-rect rendering (removes the entire host-paint-the-dynamic-part
+workaround class), diffing, `templa` integration, then images/per-corner radii/shadows.
+
+### Open questions to settle with a compiling probe, not by reading docs
+
+1. Can Tauraro list directories and spawn processes? (blocks Phase 3's shape)
+2. What does WASM interop look like — exports to JS, imports from it? (blocks Phase 2)
+3. Does SDL2 actually cross-build for `android-arm64`/`ios`? (decides if Phase 5 is days or weeks)
+4. Is `--no-heap` viable for the smallest embedded targets? (the engine uses `List`/`Dict`
+   throughout, so probably not without a parallel data path)
+5. What is `templa`'s syntax and integration surface? (ask, before building the slot)
+
+### A standing rule for backends
+
+Backends stay tiny because `Canvas` is four methods. **If a backend starts growing
+engine-shaped code, that is the signal something belongs in the core instead.** And
+"pixel-identical across tiers" is this project's strongest claim — it only stays true if it is
+checked, so byte-diffing renders should be the standard check for every backend (it already
+caught one regression).
 
 ### Cortex-M/UART tier — kept working, no longer the priority
 

@@ -75,6 +75,25 @@ $espRoot = Join-Path (Resolve-Path $OutDir).Path "esp"
 $elf = Join-Path $espRoot "EFI\BOOT\BOOTX64.EFI"
 if (-not (Test-Path $elf)) { throw "no BOOTX64.EFI at $elf -- build it first" }
 
+# A startup.nsh, so landing in the UEFI Shell still launches the app.
+#
+# OVMF's boot manager picks a boot option before we get any say, and the
+# `sendkey ret` sequence below can only dismiss a menu, not choose an entry.
+# Adding `-device usb-tablet` (needed for the AbsolutePointer protocol) is
+# enough to reshuffle those options so the Shell wins -- at which point the
+# screen shows a shell prompt instead of the UI, which looks exactly like the
+# app crashed. The Shell auto-runs startup.nsh, so this turns that failure
+# mode into a slightly slower success.
+$nsh = Join-Path $espRoot "startup.nsh"
+# ([char]92 is a backslash. Writing it literally here is asking every future
+#  sed/awk edit of this script to eat it, which it already did twice.)
+$bs = [char]92
+@(
+    "@echo -off"
+    "fs0:"
+    "${bs}EFI${bs}BOOT${bs}BOOTX64.EFI"
+) | Set-Content -Path $nsh -Encoding ascii
+
 # A single pre-quoted string, not a -ArgumentList array: PowerShell 5.1's
 # Start-Process does not reliably quote array elements that contain spaces,
 # and both the OVMF firmware path and the ESP directory are typically under
@@ -103,7 +122,14 @@ if ($needsVarsDrive) {
 
 $argParts += @(
     "-drive", "`"format=raw,file=fat:rw:$espRoot`"",
-    "-vga", "std"
+    "-vga", "std",
+    # A USB tablet, so OVMF exposes the ABSOLUTE pointer protocol.
+    # examples/uefi_demo/boot_interactive.zig prefers it over SimplePointer
+    # because it reports a position directly, where a PS/2 mouse reports only
+    # relative motion the stub would have to accumulate and clamp itself.
+    # Harmless for the static demos, which never locate a pointer at all.
+    "-usb",
+    "-device", "usb-tablet"
 )
 
 if ($NoWindow) {

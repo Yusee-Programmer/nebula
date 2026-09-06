@@ -23,7 +23,7 @@
 
 from toolkit.render.canvas import Canvas
 from toolkit.text.font import Font
-from toolkit.ui.interp import paint_rounded_rect
+from toolkit.ui.interp import paint_rounded_box_aa, draw_text
 from string.str import Str
 
 pub class TextInput:
@@ -36,6 +36,10 @@ pub class TextInput:
     pub fg:        int
     pub border:    int
     pub font:      Font
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
+    # default: needed to anti-alias this field's own outer corners against
+    # whatever flat color is actually behind it.
+    pub page_bg:   int
 
 extend TextInput:
     pub def init(max_len: int) -> TextInput:
@@ -49,6 +53,7 @@ extend TextInput:
         t.fg = 0x0F172A
         t.border = 0x64748B
         t.font = Font.load()
+        t.page_bg = 0x0B1120
         return t
 
     # Backspace (8) deletes the last character. Enter (13, 10 for a bare '\n')
@@ -99,8 +104,7 @@ extend TextInput:
         mut border_color = self.border
         if self.focused:
             border_color = 0x3B82F6
-        paint_rounded_rect(c, x, y, w, h, 6, border_color)
-        paint_rounded_rect(c, x + 2, y + 2, w - 4, h - 4, 4, self.bg)
+        paint_rounded_box_aa(c, x, y, w, h, 6, 2, self.bg, border_color, self.page_bg)
 
         mut cw = self.font.cell_w()
         mut ch = self.font.cell_h()
@@ -108,18 +112,7 @@ extend TextInput:
         mut tx = x + 8
         mut ty = y + (h - ch) / 2
 
-        mut i = 0
-        while i < n:
-            mut codepoint = Str.char_at(self.text, i)
-            mut col = 0
-            while col < cw:
-                mut row = 0
-                while row < ch:
-                    if self.font.pixel_set(codepoint, col, row):
-                        c.set_pixel(tx + i * cw + col, ty + row, self.fg)
-                    row = row + 1
-                col = col + 1
-            i = i + 1
+        draw_text(c, self.font, self.text, tx, ty, self.fg, self.bg)
 
         if self.focused and self.cursor_on:
             mut cx = tx + n * cw

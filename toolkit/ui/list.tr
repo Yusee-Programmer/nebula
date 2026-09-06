@@ -1,0 +1,100 @@
+# toolkit.ui.list — a fixed-height scrollable row list.
+#
+# Host-owned, same rationale as every widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). Clipping is ROW-granularity only: a row is
+# either fully drawn or not drawn at all, never partially. A true per-pixel
+# scissor rect would need Canvas to grow a clip-region concept (or every
+# backend's fill_rect/set_pixel to take one), which none of the four
+# backends have today -- row clipping gets 95% of the visual result (nothing
+# ever draws outside the list's own rect, because whole rows near the edges
+# just get skipped) for none of that cost.
+#
+#   mut recents = ScrollList.init(["Alice", "Bob", "Carol", ...])
+#   ...
+#   if wheel_code_seen: recents.scroll(sdl_canvas.last_wheel_delta())
+#   if clicked: recents.click_inside(mx, my, fx, fy, fw, fh)
+#   ...
+#   recents.paint(canvas, fx, fy, fw, fh)
+
+from toolkit.render.canvas import Canvas
+from toolkit.text.font import Font
+from toolkit.ui.interp import draw_text
+
+pub class ScrollList:
+    pub items:         List[str]
+    pub scroll_offset:  int   # index of the first visible row
+    pub selected_index: int   # -1 = none
+    pub row_h:          int
+    pub bg:             int
+    pub row_bg_alt:     int
+    pub fg:             int
+    pub selected_bg:    int
+    pub font:           Font
+
+extend ScrollList:
+    pub def init(items: List[str]) -> ScrollList:
+        mut l = ScrollList()
+        l.items = items
+        l.scroll_offset = 0
+        l.selected_index = 0 - 1
+        l.row_h = 28
+        l.bg = 0xFFFFFF
+        l.row_bg_alt = 0xF1F5F9
+        l.fg = 0x0F172A
+        l.selected_bg = 0xDBEAFE
+        l.font = Font.load()
+        return l
+
+    def visible_rows(self, h: int) -> int:
+        if self.row_h <= 0:
+            return 0
+        return h / self.row_h
+
+    def max_offset(self, h: int) -> int:
+        mut over = len(self.items) - self.visible_rows(h)
+        if over < 0:
+            return 0
+        return over
+
+    # delta follows SdlCanvas.last_wheel_delta()'s convention (positive = up
+    # / scroll-toward-the-start) -- one row per unit, no acceleration.
+    pub def scroll(self, delta: int, h: int) -> void:
+        self.scroll_offset = self.scroll_offset - delta
+        if self.scroll_offset < 0:
+            self.scroll_offset = 0
+        mut mx = self.max_offset(h)
+        if self.scroll_offset > mx:
+            self.scroll_offset = mx
+
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        if mx < x or mx >= x + w or my < y or my >= y + h:
+            return false
+        mut row_in_view = (my - y) / self.row_h
+        mut idx = self.scroll_offset + row_in_view
+        if idx >= 0 and idx < len(self.items):
+            self.selected_index = idx
+        return true
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        c.fill_rect(x, y, w, h, self.bg)
+
+        mut visible = self.visible_rows(h)
+        mut ch = self.font.cell_h()
+        mut i = 0
+        while i < visible:
+            mut idx = self.scroll_offset + i
+            if idx >= len(self.items):
+                i = visible
+            else:
+                mut ry = y + self.row_h * i
+                # Whatever this row's text ends up sitting on, so its
+                # antialiased edges blend against the right backdrop.
+                mut row_bg = self.bg
+                if idx == self.selected_index:
+                    c.fill_rect(x, ry, w, self.row_h, self.selected_bg)
+                    row_bg = self.selected_bg
+                elif idx % 2 == 1:
+                    c.fill_rect(x, ry, w, self.row_h, self.row_bg_alt)
+                    row_bg = self.row_bg_alt
+                draw_text(c, self.font, self.items[idx], x + 10, ry + (self.row_h - ch) / 2, self.fg, row_bg)
+                i = i + 1

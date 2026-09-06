@@ -1,0 +1,111 @@
+# toolkit.ui.checkbox — a toggleable checkbox.
+#
+# Host-owned, same shape and same reason as toolkit.ui.textinput.TextInput:
+# `checked` is per-instance mutable state with nowhere to live in the markup
+# tree (Interpreter.render() rebuilds the whole LayoutBox tree from a STATIC
+# class string every call -- see TextInput's header comment for the full
+# rationale, not repeated here). Wire it into an event loop like:
+#   mut agree = Checkbox.init(false)
+#   ...
+#   if clicked: agree.click_inside(mx, my, fx, fy, 18, 18)
+#   ...
+#   agree.paint(canvas, fx, fy, 18, 18)
+
+from toolkit.render.canvas import Canvas
+from toolkit.ui.interp import paint_rounded_rect_aa, paint_rounded_box_aa
+
+pub class Checkbox:
+    pub checked: bool
+    pub bg_off:  int   # box fill when unchecked
+    pub bg_on:   int   # box fill when checked (also the checkmark's own outline color's complement)
+    pub border:  int
+    pub mark:    int   # checkmark stroke color
+    # The flat color already sitting behind this widget, wherever the caller
+    # places it -- needed for anti-aliasing the box's own outer corners (see
+    # paint_rounded_rect_aa's comment for why: no real alpha blending
+    # anywhere in Canvas, so the edge color is blended by hand against a
+    # known backdrop instead). Defaults to this session's demo background;
+    # set it directly if you place a Checkbox somewhere else.
+    pub page_bg: int
+
+extend Checkbox:
+    pub def init(checked: bool) -> Checkbox:
+        mut b = Checkbox()
+        b.checked = checked
+        b.bg_off = 0xFFFFFF
+        b.bg_on = 0x3B82F6
+        b.border = 0x64748B
+        b.mark = 0xFFFFFF
+        b.page_bg = 0x0B1120
+        return b
+
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        mut inside = mx >= x and mx < x + w and my >= y and my < y + h
+        if inside:
+            self.checked = not self.checked
+        return inside
+
+    # w/h are normally both the box's own side length (e.g. 18) -- passed
+    # explicitly, like TextInput.paint, rather than hardcoded, so callers can
+    # size it to match surrounding text.
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        if self.checked:
+            paint_rounded_rect_aa(c, x, y, w, h, 4, self.bg_on, self.page_bg)
+        else:
+            paint_rounded_box_aa(c, x, y, w, h, 4, 2, self.bg_off, self.border, self.page_bg)
+
+        if not self.checked:
+            return
+
+        # Checkmark: two short thick strokes (down-left leg, up-right leg),
+        # each drawn as a filled rect rotated only in the loose sense that its
+        # long axis is diagonal -- built from per-pixel set_pixel steps along
+        # a line with a fixed thickness, not a real line-drawing primitive
+        # (Canvas has none -- see toolkit/render/canvas.tr). Proportioned
+        # against w/h so it scales with whatever size the caller painted the
+        # box at, rather than being pinned to one exact pixel size.
+        mut thick = w / 8
+        if thick < 1:
+            thick = 1
+
+        # Short leg: from ~28%,52% down to ~42%,68% of the box.
+        draw_thick_line(c, x + w * 28 / 100, y + h * 52 / 100, x + w * 42 / 100, y + h * 68 / 100, thick, self.mark)
+        # Long leg: from ~42%,68% up to ~74%,32% of the box.
+        draw_thick_line(c, x + w * 42 / 100, y + h * 68 / 100, x + w * 74 / 100, y + h * 32 / 100, thick, self.mark)
+
+# Bresenham-ish integer line, thickened by painting a `thick`x`thick` square
+# at every step rather than a single pixel -- good enough for a handful of
+# short checkmark/UI-glyph strokes at these sizes; not meant for long lines or
+# a real vector stroke.
+pub def draw_thick_line(c: Canvas, x0: int, y0: int, x1: int, y1: int, thick: int, color: int) -> void:
+    mut dx = x1 - x0
+    if dx < 0:
+        dx = 0 - dx
+    mut dy = y1 - y0
+    if dy < 0:
+        dy = 0 - dy
+    mut sx = 1
+    if x0 >= x1:
+        sx = 0 - 1
+    mut sy = 1
+    if y0 >= y1:
+        sy = 0 - 1
+    mut err = dx - dy
+
+    mut cx = x0
+    mut cy = y0
+    mut guard = 0
+    mut max_steps = dx + dy + 4
+    while guard <= max_steps:
+        c.fill_rect(cx - thick / 2, cy - thick / 2, thick, thick, color)
+        if cx == x1 and cy == y1:
+            guard = max_steps + 1
+        else:
+            mut e2 = err * 2
+            if e2 > 0 - dy:
+                err = err - dy
+                cx = cx + sx
+            if e2 < dx:
+                err = err + dx
+                cy = cy + sy
+            guard = guard + 1

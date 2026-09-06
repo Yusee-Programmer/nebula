@@ -1,10 +1,16 @@
 # toolkit.layout.flex — a deliberately small flexbox subset.
 #
-# Supported: row/column direction, padding, gap, fixed width/height, and a
-# single-flag `grow` that splits leftover main-axis space evenly. Not supported,
-# on purpose: wrap, shrink, align/justify, absolute positioning, percentages.
-# Each of those is easy to add later and none of them is needed to prove the
-# interpreter drives real geometry.
+# Supported: row/column direction, per-side padding and margins, per-axis gap,
+# fixed / fractional (w-1/2, w-full) width and height, a single-flag `grow`
+# that splits leftover main-axis space evenly, main-axis `justify-*` (start,
+# center, end, between, around, evenly) and cross-axis `items-*` alignment.
+# Not supported, on purpose: wrap, shrink, absolute positioning.
+#
+# Alignment stopped being optional the moment the toolkit had buttons: a
+# `<button>` wrapping a `<text>` put its label hard against the top-left
+# corner, which reads as broken next to any real UI, and no combination of
+# padding fixes it because the label's own size varies with its content.
+# `justify-center items-center` on the button is the whole fix.
 #
 # Three passes, in the order layout engines always want:
 #   build   — UiNode tree -> LayoutBox tree, resolving each class string once
@@ -13,6 +19,8 @@
 
 from toolkit.ui.ast import UiNode, read_node, max_depth
 from toolkit.ui.style import Style, StyleCache, dir_col
+from toolkit.ui.style import align_stretch, align_center, align_end, align_between
+from toolkit.ui.style import align_around, align_evenly
 from toolkit.text.font_data import font_cell_w, font_cell_h
 from string.str import Str
 
@@ -97,6 +105,32 @@ pub def build(node: Pointer[UiNode], cache: StyleCache, depth: int) -> LayoutBox
             return LayoutBox.init(kind_element(), "unknown", "", "", "", Style.default())
 
 # --- pass 2: measure -------------------------------------------------------
+#
+# Bottom-up intrinsic sizing. A child's MARGINS count toward its parent's
+# content size (that is what makes m-4 push a parent wider rather than
+# silently overlapping a sibling), but a child sized as a FRACTION of its
+# parent contributes nothing -- its size is not known until the parent's own
+# size is, which is a pass later. That matches CSS, where a percentage width
+# does not feed back into its container's intrinsic width.
+
+# Main-axis extent of a child including its margins, for direction is_col.
+def outer_main(c: LayoutBox, is_col: bool) -> int:
+    if is_col:
+        return c.h + c.style.mar_t + c.style.mar_b
+    return c.w + c.style.mar_l + c.style.mar_r
+
+def outer_cross(c: LayoutBox, is_col: bool) -> int:
+    if is_col:
+        return c.w + c.style.mar_l + c.style.mar_r
+    return c.h + c.style.mar_t + c.style.mar_b
+
+# The gap that applies along a box's own main axis. Gap is stored per axis
+# (gap-x-* / gap-y-*) so one class string can serve both a row and a column,
+# but only the matching one is ever read.
+def main_gap(box: LayoutBox) -> int:
+    if box.style.dir == dir_col():
+        return box.style.gap_y
+    return box.style.gap_x
 
 pub def measure(box: LayoutBox) -> void:
     if box.kind == kind_text():
@@ -115,23 +149,19 @@ pub def measure(box: LayoutBox) -> void:
         measure(box.children[i])
         i = i + 1
 
-    mut pad = box.style.pad
-    mut gap = box.style.gap
+    mut gap = main_gap(box)
     mut nkids = len(box.children)
+    mut is_col = box.style.dir == dir_col()
 
     mut main = 0
     mut cross = 0
     mut j = 0
     while j < nkids:
         mut c = box.children[j]
-        if box.style.dir == dir_col():
-            main = main + c.h
-            if c.w > cross:
-                cross = c.w
-        else:
-            main = main + c.w
-            if c.h > cross:
-                cross = c.h
+        main = main + outer_main(c, is_col)
+        mut oc = outer_cross(c, is_col)
+        if oc > cross:
+            cross = oc
         j = j + 1
 
     if nkids > 1:
@@ -139,19 +169,19 @@ pub def measure(box: LayoutBox) -> void:
 
     mut content_w = cross
     mut content_h = main
-    if box.style.dir != dir_col():
+    if not is_col:
         content_w = main
         content_h = cross
 
     if box.style.w >= 0:
         box.w = box.style.w
     else:
-        box.w = content_w + pad * 2
+        box.w = content_w + box.style.pad_l + box.style.pad_r
 
     if box.style.h >= 0:
         box.h = box.style.h
     else:
-        box.h = content_h + pad * 2
+        box.h = content_h + box.style.pad_t + box.style.pad_b
 
 # --- pass 3: place ---------------------------------------------------------
 
@@ -163,25 +193,38 @@ pub def place(box: LayoutBox, x: int, y: int) -> void:
     if nkids == 0:
         return
 
-    mut pad = box.style.pad
-    mut gap = box.style.gap
+    mut gap = main_gap(box)
     mut is_col = box.style.dir == dir_col()
 
-    # Leftover main-axis space inside the content box, split evenly across the
-    # children that asked to grow.
-    mut inner_main = box.h - pad * 2
-    if not is_col:
-        inner_main = box.w - pad * 2
+    # The content box: what is left of this box after its own padding.
+    # Everything below positions and sizes children inside this rectangle.
+    mut inner_w = box.w - box.style.pad_l - box.style.pad_r
+    mut inner_h = box.h - box.style.pad_t - box.style.pad_b
+    mut inner_main = inner_w
+    mut inner_cross = inner_h
+    if is_col:
+        inner_main = inner_h
+        inner_cross = inner_w
+
+    # Fractional sizes resolve here, against the content box, and before any
+    # of the arithmetic below reads a child size. Kept as num/den rather than
+    # a percentage so w-1/3 of 300px is exactly 100px -- see toolkit.ui.scale
+    # on why three 33% children fail to fill a row.
+    mut f = 0
+    while f < nkids:
+        mut cf = box.children[f]
+        if cf.style.w_den > 0:
+            cf.w = inner_w * cf.style.w_num / cf.style.w_den
+        if cf.style.h_den > 0:
+            cf.h = inner_h * cf.style.h_num / cf.style.h_den
+        f = f + 1
 
     mut used = 0
     mut growers = 0
     mut i = 0
     while i < nkids:
         mut c = box.children[i]
-        if is_col:
-            used = used + c.h
-        else:
-            used = used + c.w
+        used = used + outer_main(c, is_col)
         if c.style.grow > 0:
             growers = growers + 1
         i = i + 1
@@ -194,8 +237,48 @@ pub def place(box: LayoutBox, x: int, y: int) -> void:
         if inner_main > used:
             extra = (inner_main - used) / growers
 
-    mut cursor_x = box.x + pad
-    mut cursor_y = box.y + pad
+    # Main-axis distribution. grow and justify answer the same question --
+    # what happens to leftover main-axis space -- so a box with any growing
+    # child has no leftover space to distribute and justify becomes a no-op
+    # there. That mirrors real flexbox and means the two features never fight.
+    mut slack = inner_main - used
+    if slack < 0:
+        slack = 0
+    if growers > 0:
+        slack = 0
+
+    # lead is space before the first child; spread is extra space added after
+    # each child on top of the gap. The distributed modes differ only in how
+    # they split slack between those two.
+    mut lead = 0
+    mut spread = 0
+    if box.style.justify == align_center():
+        lead = slack / 2
+    elif box.style.justify == align_end():
+        lead = slack
+    elif box.style.justify == align_between():
+        # First child flush to the start, last flush to the end. With one
+        # child there is no gap to put anything in, so it stays at the start.
+        if nkids > 1:
+            spread = slack / (nkids - 1)
+    elif box.style.justify == align_around():
+        # Each child gets equal space on both sides, so the outer edges get
+        # half of what sits between any two children.
+        spread = slack / nkids
+        lead = spread / 2
+    elif box.style.justify == align_evenly():
+        # Every space -- both edges and every gap between children -- is the
+        # same size, so there are nkids+1 of them.
+        spread = slack / (nkids + 1)
+        lead = spread
+
+    mut cursor_x = box.x + box.style.pad_l
+    mut cursor_y = box.y + box.style.pad_t
+    if is_col:
+        cursor_y = cursor_y + lead
+    else:
+        cursor_x = cursor_x + lead
+
     mut k = 0
     while k < nkids:
         mut c2 = box.children[k]
@@ -206,24 +289,36 @@ pub def place(box: LayoutBox, x: int, y: int) -> void:
             else:
                 c2.w = c2.w + extra
 
-        # Cross-axis stretch: a child with no explicit cross size fills the
-        # parent's content box. This is flex-start on main, stretch on cross.
-        if is_col:
-            if c2.style.w < 0:
-                c2.w = box.w - pad * 2
+        # Cross-axis sizing and offset. Stretch (the default) grows a child
+        # with no explicit cross size to fill the content box, which leaves
+        # nothing to align; every other mode leaves the child at its measured
+        # cross size and shifts it within the leftover room instead. A
+        # stretched child cross margins eat into what it fills.
+        mut cross_off = 0
+        if box.style.align == align_stretch():
+            if is_col:
+                if c2.style.w < 0 and c2.style.w_den <= 0:
+                    c2.w = inner_w - c2.style.mar_l - c2.style.mar_r
+            else:
+                if c2.style.h < 0 and c2.style.h_den <= 0:
+                    c2.h = inner_h - c2.style.mar_t - c2.style.mar_b
         else:
-            if c2.style.h < 0:
-                c2.h = box.h - pad * 2
-
-        place(c2, cursor_x, cursor_y)
+            mut cross_slack = inner_cross - outer_cross(c2, is_col)
+            if cross_slack < 0:
+                cross_slack = 0
+            if box.style.align == align_center():
+                cross_off = cross_slack / 2
+            elif box.style.align == align_end():
+                cross_off = cross_slack
 
         if is_col:
-            cursor_y = cursor_y + c2.h + gap
+            place(c2, cursor_x + cross_off + c2.style.mar_l, cursor_y + c2.style.mar_t)
+            cursor_y = cursor_y + outer_main(c2, is_col) + gap + spread
         else:
-            cursor_x = cursor_x + c2.w + gap
+            place(c2, cursor_x + c2.style.mar_l, cursor_y + cross_off + c2.style.mar_t)
+            cursor_x = cursor_x + outer_main(c2, is_col) + gap + spread
         k = k + 1
 
-# Convenience: the whole pipeline against a viewport.
 pub def layout_tree(node: Pointer[UiNode], cache: StyleCache, vw: int, vh: int) -> LayoutBox:
     mut root = build(node, cache, 0)
     measure(root)

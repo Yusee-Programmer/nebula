@@ -1,0 +1,353 @@
+# toolkit.ui.palette — GENERATED. Do not edit by hand.
+#
+# Regenerate with scripts/gen-palette.sh (data: scripts/tailwind-palette.txt).
+#
+# The full Tailwind color palette: 22 hues x 11 shades (50, 100..900, 950),
+# packed 0x00RRGGBB, the same encoding toolkit.types.rgb() produces and every
+# Canvas backend writes directly.
+#
+# This module imports NOTHING on purpose. toolkit.ui.style imports it, and
+# Tauraro rejects circular imports, so it cannot import style's own unset()
+# sentinel back -- it re-declares the identical value as no_color() instead.
+# The two must stay equal; they are both "-1", and there is a compile-checked
+# assertion of that in style.tr's resolve_color_token.
+
+# Same value as toolkit.ui.style.unset(). See the note above for why this is
+# a second declaration rather than an import.
+pub def no_color() -> int:
+    return 0 - 1
+
+# Shade index for a Tailwind shade number, or -1 if it is not one of the
+# eleven real steps. Callers use this to tell "bg-blue-500" (a shade) from
+# "bg-blue-foo" (a typo) before doing any lookup.
+pub def shade_index(shade: int) -> int:
+    if shade == 50: return 0
+    if shade == 100: return 1
+    if shade == 200: return 2
+    if shade == 300: return 3
+    if shade == 400: return 4
+    if shade == 500: return 5
+    if shade == 600: return 6
+    if shade == 700: return 7
+    if shade == 800: return 8
+    if shade == 900: return 9
+    if shade == 950: return 10
+    return 0 - 1
+
+# One hue + one shade number -> packed color, or no_color() for an unknown
+# hue or a shade that is not a real Tailwind step. Bare `bg-blue` (no shade)
+# is handled by the caller, which substitutes 500 -- Tailwind's own default.
+pub def color_shade(hue: str, shade: int) -> int:
+    mut i = shade_index(shade)
+    if i < 0:
+        return no_color()
+
+    if hue == "slate":
+        if i == 0: return 0xF8FAFC
+        if i == 1: return 0xF1F5F9
+        if i == 2: return 0xE2E8F0
+        if i == 3: return 0xCBD5E1
+        if i == 4: return 0x94A3B8
+        if i == 5: return 0x64748B
+        if i == 6: return 0x475569
+        if i == 7: return 0x334155
+        if i == 8: return 0x1E293B
+        if i == 9: return 0x0F172A
+        if i == 10: return 0x020617
+        return no_color()
+
+    if hue == "gray":
+        if i == 0: return 0xF9FAFB
+        if i == 1: return 0xF3F4F6
+        if i == 2: return 0xE5E7EB
+        if i == 3: return 0xD1D5DB
+        if i == 4: return 0x9CA3AF
+        if i == 5: return 0x6B7280
+        if i == 6: return 0x4B5563
+        if i == 7: return 0x374151
+        if i == 8: return 0x1F2937
+        if i == 9: return 0x111827
+        if i == 10: return 0x030712
+        return no_color()
+
+    if hue == "zinc":
+        if i == 0: return 0xFAFAFA
+        if i == 1: return 0xF4F4F5
+        if i == 2: return 0xE4E4E7
+        if i == 3: return 0xD4D4D8
+        if i == 4: return 0xA1A1AA
+        if i == 5: return 0x71717A
+        if i == 6: return 0x52525B
+        if i == 7: return 0x3F3F46
+        if i == 8: return 0x27272A
+        if i == 9: return 0x18181B
+        if i == 10: return 0x09090B
+        return no_color()
+
+    if hue == "neutral":
+        if i == 0: return 0xFAFAFA
+        if i == 1: return 0xF5F5F5
+        if i == 2: return 0xE5E5E5
+        if i == 3: return 0xD4D4D4
+        if i == 4: return 0xA3A3A3
+        if i == 5: return 0x737373
+        if i == 6: return 0x525252
+        if i == 7: return 0x404040
+        if i == 8: return 0x262626
+        if i == 9: return 0x171717
+        if i == 10: return 0x0A0A0A
+        return no_color()
+
+    if hue == "stone":
+        if i == 0: return 0xFAFAF9
+        if i == 1: return 0xF5F5F4
+        if i == 2: return 0xE7E5E4
+        if i == 3: return 0xD6D3D1
+        if i == 4: return 0xA8A29E
+        if i == 5: return 0x78716C
+        if i == 6: return 0x57534E
+        if i == 7: return 0x44403C
+        if i == 8: return 0x292524
+        if i == 9: return 0x1C1917
+        if i == 10: return 0x0C0A09
+        return no_color()
+
+    if hue == "red":
+        if i == 0: return 0xFEF2F2
+        if i == 1: return 0xFEE2E2
+        if i == 2: return 0xFECACA
+        if i == 3: return 0xFCA5A5
+        if i == 4: return 0xF87171
+        if i == 5: return 0xEF4444
+        if i == 6: return 0xDC2626
+        if i == 7: return 0xB91C1C
+        if i == 8: return 0x991B1B
+        if i == 9: return 0x7F1D1D
+        if i == 10: return 0x450A0A
+        return no_color()
+
+    if hue == "orange":
+        if i == 0: return 0xFFF7ED
+        if i == 1: return 0xFFEDD5
+        if i == 2: return 0xFED7AA
+        if i == 3: return 0xFDBA74
+        if i == 4: return 0xFB923C
+        if i == 5: return 0xF97316
+        if i == 6: return 0xEA580C
+        if i == 7: return 0xC2410C
+        if i == 8: return 0x9A3412
+        if i == 9: return 0x7C2D12
+        if i == 10: return 0x431407
+        return no_color()
+
+    if hue == "amber":
+        if i == 0: return 0xFFFBEB
+        if i == 1: return 0xFEF3C7
+        if i == 2: return 0xFDE68A
+        if i == 3: return 0xFCD34D
+        if i == 4: return 0xFBBF24
+        if i == 5: return 0xF59E0B
+        if i == 6: return 0xD97706
+        if i == 7: return 0xB45309
+        if i == 8: return 0x92400E
+        if i == 9: return 0x78350F
+        if i == 10: return 0x451A03
+        return no_color()
+
+    if hue == "yellow":
+        if i == 0: return 0xFEFCE8
+        if i == 1: return 0xFEF9C3
+        if i == 2: return 0xFEF08A
+        if i == 3: return 0xFDE047
+        if i == 4: return 0xFACC15
+        if i == 5: return 0xEAB308
+        if i == 6: return 0xCA8A04
+        if i == 7: return 0xA16207
+        if i == 8: return 0x854D0E
+        if i == 9: return 0x713F12
+        if i == 10: return 0x422006
+        return no_color()
+
+    if hue == "lime":
+        if i == 0: return 0xF7FEE7
+        if i == 1: return 0xECFCCB
+        if i == 2: return 0xD9F99D
+        if i == 3: return 0xBEF264
+        if i == 4: return 0xA3E635
+        if i == 5: return 0x84CC16
+        if i == 6: return 0x65A30D
+        if i == 7: return 0x4D7C0F
+        if i == 8: return 0x3F6212
+        if i == 9: return 0x365314
+        if i == 10: return 0x1A2E05
+        return no_color()
+
+    if hue == "green":
+        if i == 0: return 0xF0FDF4
+        if i == 1: return 0xDCFCE7
+        if i == 2: return 0xBBF7D0
+        if i == 3: return 0x86EFAC
+        if i == 4: return 0x4ADE80
+        if i == 5: return 0x22C55E
+        if i == 6: return 0x16A34A
+        if i == 7: return 0x15803D
+        if i == 8: return 0x166534
+        if i == 9: return 0x14532D
+        if i == 10: return 0x052E16
+        return no_color()
+
+    if hue == "emerald":
+        if i == 0: return 0xECFDF5
+        if i == 1: return 0xD1FAE5
+        if i == 2: return 0xA7F3D0
+        if i == 3: return 0x6EE7B7
+        if i == 4: return 0x34D399
+        if i == 5: return 0x10B981
+        if i == 6: return 0x059669
+        if i == 7: return 0x047857
+        if i == 8: return 0x065F46
+        if i == 9: return 0x064E3B
+        if i == 10: return 0x022C22
+        return no_color()
+
+    if hue == "teal":
+        if i == 0: return 0xF0FDFA
+        if i == 1: return 0xCCFBF1
+        if i == 2: return 0x99F6E4
+        if i == 3: return 0x5EEAD4
+        if i == 4: return 0x2DD4BF
+        if i == 5: return 0x14B8A6
+        if i == 6: return 0x0D9488
+        if i == 7: return 0x0F766E
+        if i == 8: return 0x115E59
+        if i == 9: return 0x134E4A
+        if i == 10: return 0x042F2E
+        return no_color()
+
+    if hue == "cyan":
+        if i == 0: return 0xECFEFF
+        if i == 1: return 0xCFFAFE
+        if i == 2: return 0xA5F3FC
+        if i == 3: return 0x67E8F9
+        if i == 4: return 0x22D3EE
+        if i == 5: return 0x06B6D4
+        if i == 6: return 0x0891B2
+        if i == 7: return 0x0E7490
+        if i == 8: return 0x155E75
+        if i == 9: return 0x164E63
+        if i == 10: return 0x083344
+        return no_color()
+
+    if hue == "sky":
+        if i == 0: return 0xF0F9FF
+        if i == 1: return 0xE0F2FE
+        if i == 2: return 0xBAE6FD
+        if i == 3: return 0x7DD3FC
+        if i == 4: return 0x38BDF8
+        if i == 5: return 0x0EA5E9
+        if i == 6: return 0x0284C7
+        if i == 7: return 0x0369A1
+        if i == 8: return 0x075985
+        if i == 9: return 0x0C4A6E
+        if i == 10: return 0x082F49
+        return no_color()
+
+    if hue == "blue":
+        if i == 0: return 0xEFF6FF
+        if i == 1: return 0xDBEAFE
+        if i == 2: return 0xBFDBFE
+        if i == 3: return 0x93C5FD
+        if i == 4: return 0x60A5FA
+        if i == 5: return 0x3B82F6
+        if i == 6: return 0x2563EB
+        if i == 7: return 0x1D4ED8
+        if i == 8: return 0x1E40AF
+        if i == 9: return 0x1E3A8A
+        if i == 10: return 0x172554
+        return no_color()
+
+    if hue == "indigo":
+        if i == 0: return 0xEEF2FF
+        if i == 1: return 0xE0E7FF
+        if i == 2: return 0xC7D2FE
+        if i == 3: return 0xA5B4FC
+        if i == 4: return 0x818CF8
+        if i == 5: return 0x6366F1
+        if i == 6: return 0x4F46E5
+        if i == 7: return 0x4338CA
+        if i == 8: return 0x3730A3
+        if i == 9: return 0x312E81
+        if i == 10: return 0x1E1B4B
+        return no_color()
+
+    if hue == "violet":
+        if i == 0: return 0xF5F3FF
+        if i == 1: return 0xEDE9FE
+        if i == 2: return 0xDDD6FE
+        if i == 3: return 0xC4B5FD
+        if i == 4: return 0xA78BFA
+        if i == 5: return 0x8B5CF6
+        if i == 6: return 0x7C3AED
+        if i == 7: return 0x6D28D9
+        if i == 8: return 0x5B21B6
+        if i == 9: return 0x4C1D95
+        if i == 10: return 0x2E1065
+        return no_color()
+
+    if hue == "purple":
+        if i == 0: return 0xFAF5FF
+        if i == 1: return 0xF3E8FF
+        if i == 2: return 0xE9D5FF
+        if i == 3: return 0xD8B4FE
+        if i == 4: return 0xC084FC
+        if i == 5: return 0xA855F7
+        if i == 6: return 0x9333EA
+        if i == 7: return 0x7E22CE
+        if i == 8: return 0x6B21A8
+        if i == 9: return 0x581C87
+        if i == 10: return 0x3B0764
+        return no_color()
+
+    if hue == "fuchsia":
+        if i == 0: return 0xFDF4FF
+        if i == 1: return 0xFAE8FF
+        if i == 2: return 0xF5D0FE
+        if i == 3: return 0xF0ABFC
+        if i == 4: return 0xE879F9
+        if i == 5: return 0xD946EF
+        if i == 6: return 0xC026D3
+        if i == 7: return 0xA21CAF
+        if i == 8: return 0x86198F
+        if i == 9: return 0x701A75
+        if i == 10: return 0x4A044E
+        return no_color()
+
+    if hue == "pink":
+        if i == 0: return 0xFDF2F8
+        if i == 1: return 0xFCE7F3
+        if i == 2: return 0xFBCFE8
+        if i == 3: return 0xF9A8D4
+        if i == 4: return 0xF472B6
+        if i == 5: return 0xEC4899
+        if i == 6: return 0xDB2777
+        if i == 7: return 0xBE185D
+        if i == 8: return 0x9D174D
+        if i == 9: return 0x831843
+        if i == 10: return 0x500724
+        return no_color()
+
+    if hue == "rose":
+        if i == 0: return 0xFFF1F2
+        if i == 1: return 0xFFE4E6
+        if i == 2: return 0xFECDD3
+        if i == 3: return 0xFDA4AF
+        if i == 4: return 0xFB7185
+        if i == 5: return 0xF43F5E
+        if i == 6: return 0xE11D48
+        if i == 7: return 0xBE123C
+        if i == 8: return 0x9F1239
+        if i == 9: return 0x881337
+        if i == 10: return 0x4C0519
+        return no_color()
+
+    return no_color()

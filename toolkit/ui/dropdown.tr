@@ -1,0 +1,161 @@
+# toolkit.ui.dropdown — a click-to-open select box.
+#
+# Host-owned, same rationale as every widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). The most stateful of the set: besides
+# `selected_index` it also tracks whether the item list is currently open,
+# and while open it paints ON TOP of whatever else the frame already drew
+# (the caller must call .paint() for this widget AFTER render_to() and every
+# other widget's own .paint(), the same ordering TextInput/Checkbox/etc.
+# already need for the same reason -- last-painted wins).
+#
+#   mut size = Dropdown.init(["Small", "Medium", "Large"], 1)
+#   ...
+#   if clicked: size.click_inside(mx, my, fx, fy, fw, fh)
+#   ...
+#   size.paint(canvas, fx, fy, fw, fh)   # paint LAST -- the open list overlays
+
+from toolkit.render.canvas import Canvas
+from toolkit.text.font import Font
+from toolkit.ui.interp import paint_rounded_box_aa, draw_text
+
+pub class Dropdown:
+    pub items:         List[str]
+    pub selected_index: int
+    pub open:          bool
+    pub hover_index:   int   # -1 = none; set from paint()'s own last call site info via hover_at()
+    pub bg:            int
+    pub border:        int
+    pub fg:            int
+    pub hover_bg:      int
+    pub font:          Font
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
+    # default. Used for the closed box's outer corners AND the open list's
+    # outer corners, both of which sit directly on the page (the list drops
+    # straight down from the box onto whatever's below it, not onto the box
+    # itself).
+    pub page_bg:       int
+
+extend Dropdown:
+    pub def init(items: List[str], selected_index: int) -> Dropdown:
+        mut d = Dropdown()
+        d.items = items
+        d.selected_index = selected_index
+        d.open = false
+        d.hover_index = 0 - 1
+        d.bg = 0xFFFFFF
+        d.border = 0x64748B
+        d.fg = 0x0F172A
+        d.hover_bg = 0xE2E8F0
+        d.font = Font.load()
+        d.page_bg = 0x0B1120
+        return d
+
+    pub def selected_text(self) -> str:
+        if self.selected_index < 0:
+            return ""
+        if self.selected_index >= len(self.items):
+            return ""
+        return self.items[self.selected_index]
+
+    # Continuous hover tracking for the open item list -- same shape as
+    # Interpreter.hover_x/hover_y (a per-frame value the caller sets from its
+    # own mouse_state(), not a discrete click), so the item under the cursor
+    # highlights before it's actually clicked. Call every frame; a no-op
+    # visually while closed (paint() only uses it when self.open).
+    pub def hover_at(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> void:
+        if not self.open:
+            self.hover_index = 0 - 1
+            return
+        if mx < x or mx >= x + w:
+            self.hover_index = 0 - 1
+            return
+        mut rel_y = my - (y + h)
+        if rel_y < 0:
+            self.hover_index = 0 - 1
+            return
+        mut idx = rel_y / h
+        if idx >= len(self.items):
+            self.hover_index = 0 - 1
+            return
+        self.hover_index = idx
+
+    # One method handles all three outcomes: toggling the closed box, picking
+    # an open item, and closing on a click anywhere else -- matching the
+    # single "click_inside, returns whether it did something" shape every
+    # other widget here uses, rather than three separate entry points a
+    # caller would have to sequence correctly.
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        mut in_box = mx >= x and mx < x + w and my >= y and my < y + h
+        if in_box:
+            self.open = not self.open
+            return true
+
+        if self.open:
+            mut n = len(self.items)
+            mut list_top = y + h
+            mut list_bottom = list_top + h * n
+            if mx >= x and mx < x + w and my >= list_top and my < list_bottom:
+                mut idx = (my - list_top) / h
+                if idx >= 0 and idx < n:
+                    self.selected_index = idx
+                self.open = false
+                return true
+            self.open = false
+            return true
+
+        return false
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        mut border_color = self.border
+        if self.open:
+            border_color = 0x3B82F6
+        paint_rounded_box_aa(c, x, y, w, h, 6, 2, self.bg, border_color, self.page_bg)
+
+        mut cw = self.font.cell_w()
+        mut ch = self.font.cell_h()
+        draw_text(c, self.font, self.selected_text(), x + 10, y + (h - ch) / 2, self.fg, self.bg)
+
+        # Chevron: three narrowing centered rects, pointing down when closed,
+        # up when open -- the same "cheap glyph via a few fill_rects" spirit
+        # as Checkbox's checkmark, without needing a real triangle-fill
+        # primitive Canvas doesn't have.
+        mut chevron_cx = x + w - 18
+        mut chevron_cy = y + h / 2
+        mut i = 0
+        while i < 3:
+            mut half = 5 - i * 2
+            mut row_y = chevron_cy - 2 + i * 2
+            if self.open:
+                row_y = chevron_cy + 2 - i * 2
+            c.fill_rect(chevron_cx - half, row_y, half * 2, 2, self.fg)
+            i = i + 1
+
+        if not self.open:
+            return
+
+        mut n = len(self.items)
+        mut list_y = y + h
+        mut list_h = h * n
+
+        # Outlined panel via the same single-pass fill+ring primitive
+        # Interpreter.paint uses -- Canvas has no stroke-only rect primitive
+        # (deliberately, see canvas.tr), so the ring is resolved per-subsample
+        # inside paint_rounded_box_aa rather than as two overlapping fills.
+        paint_rounded_box_aa(c, x, list_y, w, list_h, 6, 1, self.bg, border_color, self.page_bg)
+
+        mut row = 0
+        while row < n:
+            mut ry = list_y + h * row
+            # Whatever this row's text ends up sitting on, for its own
+            # antialiased blend: the hover fill if this row is hovered,
+            # otherwise the list's plain background. (The selected-row accent
+            # bar below is only 3px wide at x+1, and the text starts at x+10,
+            # so it never sits on the accent color.)
+            mut row_bg = self.bg
+            if row == self.hover_index:
+                c.fill_rect(x + 1, ry, w - 2, h, self.hover_bg)
+                row_bg = self.hover_bg
+            if row == self.selected_index:
+                c.fill_rect(x + 1, ry, 3, h, 0x3B82F6)
+            draw_text(c, self.font, self.items[row], x + 10, ry + (h - ch) / 2, self.fg, row_bg)
+            row = row + 1

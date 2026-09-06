@@ -35,12 +35,13 @@
 
 from toolkit.render.canvas import Canvas
 from toolkit.types import Event, red_of, green_of, blue_of
-from toolkit.render.desktop.sdl_bindings import SDL_Window, SDL_Renderer, SDL_Rect, SDL_Event
+from toolkit.render.desktop.sdl_bindings import SDL_Window, SDL_Renderer, SDL_Rect, SDL_Event, SDL_BlendMode
 from toolkit.render.desktop.sdl_bindings import SDL_Init, SDL_Quit, SDL_CreateWindow, SDL_CreateRenderer
 from toolkit.render.desktop.sdl_bindings import SDL_DestroyRenderer, SDL_DestroyWindow, SDL_PollEvent
 from toolkit.render.desktop.sdl_bindings import SDL_SetRenderDrawColor, SDL_RenderFillRect, SDL_RenderDrawPoint
 from toolkit.render.desktop.sdl_bindings import SDL_RenderPresent, SDL_RenderClear, SDL_Delay, SDL_GetError
-from toolkit.render.desktop.sdl_bindings import SDL_GetMouseState
+from toolkit.render.desktop.sdl_bindings import SDL_GetMouseState, SDL_SetRenderDrawBlendMode
+from toolkit.render.desktop.sdl_bindings import SDL_SetHint
 
 # Stable, version-independent SDL2 ABI constants that bindgen's macro pass
 # didn't pick up (defined via bit-shift/indirection macros, not plain literals).
@@ -66,6 +67,15 @@ pub def sdl_mousebuttondown() -> Uint32:
 pub def sdl_keydown() -> Uint32:
     return 768 as Uint32
 
+pub def sdl_mousewheel() -> Uint32:
+    return 1027 as Uint32
+
+pub def sdl_blendmode_none() -> SDL_BlendMode:
+    return 0 as SDL_BlendMode
+
+pub def sdl_blendmode_blend() -> SDL_BlendMode:
+    return 1 as SDL_BlendMode
+
 pub class SdlCanvas implements Canvas:
     pub win: Pointer[SDL_Window]
     pub ren: Pointer[SDL_Renderer]
@@ -81,6 +91,28 @@ extend SdlCanvas:
         c.w = w
         c.h = h
         unsafe:
+            # DPI awareness, BEFORE SDL_Init -- this hint is only read during
+            # video-subsystem startup, so setting it afterwards silently does
+            # nothing.
+            #
+            # Without it the process is DPI-unaware, and on any display with a
+            # scale factor above 100% Windows renders the window at the
+            # requested logical size and then BITMAP-STRETCHES the whole
+            # surface up to physical pixels. That stretch is a bilinear
+            # resample of an already-finished frame: it re-blurs every
+            # antialiased corner and every glyph edge the rasterizer just
+            # spent 16 subsamples per pixel computing, which is a strange way
+            # to spend that work. It also makes the window's real on-screen
+            # footprint larger than the size asked for, which is what an
+            # earlier session saw and (correctly) guessed at but did not fix.
+            #
+            # "permonitorv2" is the modern behavior: 1 SDL pixel == 1 physical
+            # pixel, no stretch, and the scale factor re-negotiated when the
+            # window moves between monitors of different DPI. The hint is
+            # Windows-only and simply ignored elsewhere, so this stays a
+            # single unconditional call rather than a platform branch.
+            SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS" as Pointer[char], "permonitorv2" as Pointer[char])
+
             mut rc = SDL_Init(sdl_init_video())
             if rc != 0:
                 c.win = 0 as Pointer[SDL_Window]
@@ -134,6 +166,46 @@ extend SdlCanvas:
             SDL_SetRenderDrawColor(self.ren, red_of(color) as Uint8, green_of(color) as Uint8, blue_of(color) as Uint8, 255 as Uint8)
             SDL_RenderDrawPoint(self.ren, x as c_int, y as c_int)
 
+    # A soft drop shadow, SDL2-only -- deliberately NOT on the Canvas interface
+    # (see toolkit/render/canvas.tr's own comment on why that stays minimal):
+    # this needs real alpha blending, which the bare-metal MMIO and UEFI GOP
+    # framebuffers cannot do at all, so making it part of the portable paint
+    # path would force those backends to either fake it (a solid darker block,
+    # not a shadow) or pay a linker-error obligation for a primitive they can
+    # never honestly implement. Callers on THIS backend call it directly,
+    # before painting the elevated panel on top, e.g. a card.
+    #
+    # Not a real Gaussian blur -- a handful of concentric, progressively
+    # larger, progressively more transparent SQUARE-cornered rects offset
+    # down-right, which is what a cheap CSS box-shadow approximation looks
+    # like too. Square corners under a blurred, faded edge read as soft
+    # anyway (the fade is doing the visual work, not the corner geometry),
+    # so this doesn't bother routing through paint_rounded_rect -- that also
+    # avoids a render-backend module reaching up into toolkit.ui.interp,
+    # which nothing else in toolkit/render/ does. `radius` is accepted for
+    # call-site symmetry with the panel it shadows and for future refinement,
+    # not used yet. Cheap enough to call every frame for a handful of cards;
+    # not something you'd want under a hot per-pixel loop.
+    pub def draw_shadow(self, x: int, y: int, w: int, h: int, radius: int) -> void:
+        unsafe:
+            SDL_SetRenderDrawBlendMode(self.ren, sdl_blendmode_blend())
+            mut layers = 6
+            mut i = 0
+            while i < layers:
+                mut spread = i + 1
+                mut alpha = 60 - i * 9
+                if alpha < 0:
+                    alpha = 0
+                SDL_SetRenderDrawColor(self.ren, 2 as Uint8, 6 as Uint8, 16 as Uint8, alpha as Uint8)
+                mut r = SDL_Rect()
+                r.x = (x - spread + 3) as c_int
+                r.y = (y - spread + 5) as c_int
+                r.w = (w + spread * 2) as c_int
+                r.h = (h + spread * 2) as c_int
+                SDL_RenderFillRect(self.ren, alloc_rect(r))
+                i = i + 1
+            SDL_SetRenderDrawBlendMode(self.ren, sdl_blendmode_none())
+
     # Flips the back buffer to the screen -- call once per frame, after every
     # fill_rect/set_pixel for that frame, never per-primitive (that would tear
     # and be needlessly slow).
@@ -177,11 +249,21 @@ def alloc_rect(r: SDL_Rect) -> Pointer[SDL_Rect]:
 #       (SDLK_a == 'a' == 97), the same rough convention UEFI's
 #       unicode_char gives tauraro_uefi_frame, so on_key handlers see a
 #       consistent code across backends.
+#   4 = a mouse-wheel event; the vertical scroll delta (positive = away from
+#       the user, i.e. "up"/scroll-content-up, matching every other desktop
+#       UI's convention) is in _last_wheel_delta, read via
+#       last_wheel_delta(). NOT a toolkit.types.Event/EventHandler dispatch --
+#       there is no "on_wheel" event kind, because wheel scroll targets
+#       whichever scrollable widget the mouse happens to be over, which is a
+#       hit-test the HOST already has to do for itself (it knows each
+#       widget's rect), not something the allowlisted handler-by-name
+#       dispatch is shaped for.
 # Any other SDL event type (window resize, ...) is silently discarded -- this
 # backend does not wire those up yet.
 mut _last_click_x: int = 0
 mut _last_click_y: int = 0
 mut _last_key_code: int = 0
+mut _last_wheel_delta: int = 0
 
 pub def poll_event() -> int:
     unsafe:
@@ -199,6 +281,9 @@ pub def poll_event() -> int:
         if e.type == sdl_keydown():
             _last_key_code = e.key.keysym.sym as int
             return 3
+        if e.type == sdl_mousewheel():
+            _last_wheel_delta = e.wheel.y as int
+            return 4
         return 0
 
 pub def last_click() -> Event:
@@ -206,6 +291,9 @@ pub def last_click() -> Event:
 
 pub def last_key() -> Event:
     return Event.key(_last_key_code)
+
+pub def last_wheel_delta() -> int:
+    return _last_wheel_delta
 
 # Continuous mouse position + left-button state, for hover/pressed feedback
 # (Interpreter.hover_x/hover_y/pressed) -- unlike poll_event()'s discrete

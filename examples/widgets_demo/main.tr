@@ -1,0 +1,288 @@
+# examples/widgets_demo — every new widget in one coherent settings panel.
+#
+# Same architecture as examples/desktop_demo (a real SDL2 window, live input,
+# the SAME toolkit source -- parser, style cache, layout, interpreter -- every
+# other tier runs, unaware this backend exists); this demo exists to actually
+# SHOW the widget expansion from this session rather than exercise it in
+# isolation. Composition, not eight disconnected boxes:
+#
+#   - a header card with a real SDL2 drop shadow (SdlCanvas.draw_shadow) and a
+#     pill Badge (pure markup -- rounded-full + p-px, no new code)
+#   - a Tabs strip swapping which of two pre-parsed markup trees render_to()
+#     draws -- the same "different string, same live Interpreter" pattern
+#     examples/hosted_demo uses for live-reload, just driven by a click
+#     instead of a file edit. Both trees are themselves Card/Divider/Badge
+#     composed purely from existing Style tokens (radius-/border-/bg-), which
+#     is the point: those three needed no new widget code at all.
+#   - a "Preferences" section: Checkbox, a 3-way Radio group, a Switch
+#   - an "Appearance" section: a Slider driving a ProgressBar's value live
+#   - a Dropdown (painted LAST among the host-owned widgets, deliberately --
+#     see the paint-order comment in the main loop below for why)
+#   - a "Recent items" ScrollList, mouse-wheel scrollable
+#   - a footer Divider + OK/Cancel buttons, plain markup like every other demo
+#
+# Run from the repository root (SDL2.dll must sit next to the built exe, or
+# be resolvable on PATH -- see scripts/build-desktop.ps1, or link SDL2.lib
+# directly and copy a runtime SDL2.dll next to the output yourself):
+#   tauraroc examples\widgets_demo\main.tr -o widgets_demo.exe --link SDL2.lib
+
+from toolkit.types import Event, EventHandler
+from toolkit.ui.parser import UiParser
+from toolkit.ui.interp import Interpreter, render_to, register_handler, paint_rounded_rect_aa, draw_text
+from toolkit.render.desktop.sdl_canvas import SdlCanvas, poll_event, last_click, last_key, last_wheel_delta, mouse_state
+from toolkit.render.desktop.sdl_bindings import SDL_Delay
+from toolkit.render.canvas import Canvas
+from toolkit.text.font import Font
+from toolkit.ui.checkbox import Checkbox
+from toolkit.ui.radio import Radio, select_only
+from toolkit.ui.switch import Switch
+from toolkit.ui.slider import Slider
+from toolkit.ui.progress import ProgressBar
+from toolkit.ui.dropdown import Dropdown
+from toolkit.ui.tabs import Tabs
+from toolkit.ui.list import ScrollList
+
+# The two tabs' content, host-painted directly (fill_rect/paint_rounded_rect/
+# draw_text) rather than as a swapped UiNode tree -- see the note where this
+# is called in main(): toolkit.layout.flex.layout_tree always sizes the ROOT
+# of whatever tree it's given to fill the ENTIRE canvas passed to render_to
+# (c.width()/c.height()), because that is what a top-level page render is
+# supposed to do. There is no sub-rect/viewport parameter to ask it to lay
+# out into a small slot instead, so a second render_to call for tab content
+# would repaint the WHOLE window, erasing the header/footer chrome that was
+# already drawn. Still exercises the same Card/Divider/Badge composition
+# (paint_rounded_rect + a couple of pill shapes) those need in the markup
+# form, just called directly instead of parsed from a class string -- the
+# point either way is that no new widget code was needed for them.
+def paint_tab_content(c: Canvas, font: Font, idx: int, x: int, y: int, w: int, h: int) -> void:
+    mut page_bg = 0x0B1120
+    if idx == 0:
+        mut gap = 8
+        mut card_w = (w - gap * 2) / 3
+        mut card_h = h
+        paint_rounded_rect_aa(c, x, y, card_w, card_h, 10, 0xEF4444, page_bg)
+        paint_rounded_rect_aa(c, x + card_w + gap, y, card_w, card_h, 10, 0x22C55E, page_bg)
+        paint_rounded_rect_aa(c, x + (card_w + gap) * 2, y, card_w, card_h, 10, 0x3B82F6, page_bg)
+        return
+
+    draw_text(c, font, "Widgets added this session:", x, y, 0xE2E8F0, page_bg)
+    c.fill_rect(x, y + 22, w, 2, 0x64748B)
+    paint_rounded_rect_aa(c, x, y + 34, 70, 26, 13, 0x3B82F6, page_bg)
+    draw_text(c, font, "8 NEW", x + 12, y + 42, 0xFFFFFF, 0x3B82F6)
+    paint_rounded_rect_aa(c, x + 80, y + 34, 60, 26, 13, 0x22C55E, page_bg)
+    draw_text(c, font, "LIVE", x + 92, y + 42, 0x0F172A, 0x22C55E)
+
+# A small section-header label + a thin rule beneath it -- the same
+# Divider-as-plain-panel composition the file header comment calls out, just
+# host-painted here alongside the other host-drawn pieces of this screen
+# rather than mixed into the markup tree.
+def paint_section_label(c: Canvas, font: Font, text: str, x: int, y: int, w: int) -> void:
+    draw_text(c, font, text, x, y, 0x94A3B8, 0x0B1120)
+    c.fill_rect(x, y + 20, w, 1, 0x334155)
+
+pub class OkHandler implements EventHandler:
+    pub label: str
+
+extend OkHandler:
+    pub def init(label: str) -> OkHandler:
+        mut h = OkHandler()
+        h.label = label
+        return h
+
+    pub def handle(self, e: Event) -> void:
+        print("  [host] " + self.label + " fired")
+
+def main():
+    # 460x560 logical pixels -- deliberately well under a 1280x720 display.
+    # Note "logical": this window is not marked DPI-aware, so on a scaled
+    # display (125%/150%/etc) Windows stretches the whole surface by that
+    # factor when presenting it, and the ACTUAL on-screen footprint can end
+    # up taller than the number below -- verified on this session's own dev
+    # machine, where the rendered window's real GetWindowRect comes back
+    # noticeably larger than 460x560. A first version of this demo used
+    # 800px and was cut off outright; this size at least keeps the important
+    # top two-thirds (header, tabs, Preferences, Appearance) on-screen on a
+    # scaled display too. A properly DPI-aware window is a real fix for this,
+    # not attempted here -- out of scope for a widget-visuals pass.
+    mut w = 460
+    mut h = 560
+    mut canvas = SdlCanvas.open("Tauraro UI Toolkit -- widgets_demo", w, h)
+    if not canvas.ok():
+        print("failed to open an SDL window/renderer")
+        return
+
+    mut it = Interpreter.init()
+    mut ok = OkHandler.init("on_ok")
+    mut cancel = OkHandler.init("on_cancel")
+    register_handler(it, "on_ok", ok)
+    register_handler(it, "on_cancel", cancel)
+
+    # Header + footer: the persistent markup tree, always rendered underneath
+    # every host-painted widget below. p-4/gap-3 (16px outer margin, 12px
+    # between the three rows) -- chosen to match the 16px left/right margin
+    # every host-painted widget below also uses, so the markup chrome and the
+    # host-drawn widgets line up on the same edges rather than each picking
+    # their own spacing independently.
+    mut chrome_src = "<panel \"flex-col p-4 gap-3 bg-slate-800\">\n  <panel \"h-16 bg-slate-700 border-slate-400 border rounded-xl p-[3px] items-center\">\n    <text \"text-white\">TAURARO WIDGETS</text>\n  </panel>\n  <panel \"h-[400px]\" />\n  <panel \"flex-row gap-[3px] h-10 p-[3px] bg-slate-700 rounded-lg\">\n    <button \"bg-amber grow border-white border-2 rounded-lg justify-center items-center\" @on_click(on_ok)>\n      <text \"text-black\">OK</text>\n    </button>\n    <button \"bg-red grow border-white border-2 rounded-lg justify-center items-center\" @on_click(on_cancel)>\n      <text \"text-white\">CANCEL</text>\n    </button>\n  </panel>\n</panel>\n"
+    mut chrome_p = UiParser.init()
+    mut chrome_tree = chrome_p.parse(chrome_src)
+    chrome_p.report()
+
+    mut ui_font = Font.load()
+
+    mut tabs = Tabs.init(["Cards", "Info"], 0)
+    mut tx = 16
+    mut ty = 92
+    mut tw = 428
+    mut th = 28
+
+    mut content_x = 16
+    mut content_y = 126
+    mut content_w = 428
+    mut content_h = 56
+
+    mut prefs_label_y = 194
+
+    mut notify_cb = Checkbox.init(true)
+    mut ncx = 16
+    mut ncy = 222
+    mut nch = 18
+
+    mut theme_label_y = 250
+
+    mut theme_light = Radio.init(true)
+    mut theme_dark = Radio.init(false)
+    mut theme_auto = Radio.init(false)
+    mut theme_group: List[Radio] = [theme_light, theme_dark, theme_auto]
+    mut rrx = 16
+    mut rry = 272
+    mut rspacing = 100
+
+    mut autoupdate_sw = Switch.init(false)
+    mut swx = 384
+    mut swy = 270
+    mut sww = 44
+    mut swh = 24
+
+    mut appearance_label_y = 308
+
+    mut brightness_sl = Slider.init(0, 100, 65)
+    mut slx = 16
+    mut sly = 332
+    mut slw = 428
+    mut slh = 22
+
+    mut brightness_pb = ProgressBar.init(65)
+    mut pbx = 16
+    mut pby = 358
+    mut pbw = 428
+    mut pbh = 10
+
+    mut accent_dd = Dropdown.init(["Blue", "Green", "Violet", "Amber"], 0)
+    mut ddx = 16
+    mut ddy = 380
+    mut ddw = 200
+    mut ddh = 30
+
+    mut recent_label_y = 420
+
+    mut recent_list = ScrollList.init(["Checkbox toggled", "Theme -> Dark", "Auto-update ON", "Brightness -> 80%", "Accent -> Violet", "Slider dragged", "Dropdown opened", "OK clicked", "Session started"])
+    mut lsx = 16
+    mut lsy = 442
+    mut lsw = 428
+    mut lsh = 56
+
+    print("window open -- checkbox/radio/switch/slider/dropdown/list/tabs all live. close the window to quit")
+
+    mut running = true
+    while running:
+        mut draining = true
+        while draining:
+            mut code = poll_event()
+            if code == 0:
+                draining = false
+            elif code == 1:
+                running = false
+                draining = false
+            elif code == 2:
+                mut clk = last_click()
+                tabs.click_inside(clk.x, clk.y, tx, ty, tw, th)
+                notify_cb.click_inside(clk.x, clk.y, ncx, ncy, nch, nch)
+                if theme_light.click_inside(clk.x, clk.y, rrx, rry, nch, nch):
+                    select_only(theme_group, 0)
+                if theme_dark.click_inside(clk.x, clk.y, rrx + rspacing, rry, nch, nch):
+                    select_only(theme_group, 1)
+                if theme_auto.click_inside(clk.x, clk.y, rrx + rspacing * 2, rry, nch, nch):
+                    select_only(theme_group, 2)
+                autoupdate_sw.click_inside(clk.x, clk.y, swx, swy, sww, swh)
+                brightness_sl.press_inside(clk.x, clk.y, slx, sly, slw, slh)
+                recent_list.click_inside(clk.x, clk.y, lsx, lsy, lsw, lsh)
+                # Dropdown handles its click LAST among widget hit-tests: while
+                # open, its item list visually overlays whatever sits below it
+                # (the divider/list section here), so it must also be the last
+                # one offered each click -- otherwise a click meant for an open
+                # dropdown item could fall through to whatever widget's rect
+                # happens to sit underneath that same screen position.
+                accent_dd.click_inside(clk.x, clk.y, ddx, ddy, ddw, ddh)
+                it.dispatch(clk)
+            elif code == 3:
+                mut ke = last_key()
+                it.dispatch(ke)
+            elif code == 4:
+                recent_list.scroll(last_wheel_delta(), lsh)
+
+        if running:
+            mut mx, my, mdown = mouse_state()
+            it.hover_x = mx
+            it.hover_y = my
+            it.pressed = mdown
+            accent_dd.hover_at(mx, my, ddx, ddy, ddw, ddh)
+            if mdown:
+                brightness_sl.drag_to(mx)
+            else:
+                brightness_sl.dragging = false
+            brightness_pb.set_value(brightness_sl.value)
+            autoupdate_sw.tick()
+
+            canvas.clear(0x0B1120)
+            # Shadow drawn BEFORE the chrome tree, so it sits underneath the
+            # header card (render_to paints the card's own bg on top of it,
+            # covering everything but the soft edge peeking out past the
+            # card's own rect) -- not painted after, which would draw it OVER
+            # the card instead of behind it.
+            canvas.draw_shadow(16, 16, 428, 64, 12)
+            render_to(it, chrome_tree, canvas)
+
+            tabs.paint(canvas, tx, ty, tw, th)
+            paint_tab_content(canvas, ui_font, tabs.selected_index, content_x, content_y, content_w, content_h)
+
+            paint_section_label(canvas, ui_font, "PREFERENCES", 16, prefs_label_y, 428)
+            notify_cb.paint(canvas, ncx, ncy, nch, nch)
+            draw_text(canvas, ui_font, "Enable notifications", ncx + nch + 10, ncy + 1, 0xE2E8F0, 0x0B1120)
+
+            draw_text(canvas, ui_font, "Theme", 16, theme_label_y, 0x94A3B8, 0x0B1120)
+            theme_light.paint(canvas, rrx, rry, nch, nch)
+            theme_dark.paint(canvas, rrx + rspacing, rry, nch, nch)
+            theme_auto.paint(canvas, rrx + rspacing * 2, rry, nch, nch)
+            draw_text(canvas, ui_font, "Auto-update", swx - 110, swy + 3, 0xE2E8F0, 0x0B1120)
+            autoupdate_sw.paint(canvas, swx, swy, sww, swh)
+
+            paint_section_label(canvas, ui_font, "APPEARANCE", 16, appearance_label_y, 428)
+            brightness_sl.paint(canvas, slx, sly, slw, slh)
+            brightness_pb.paint(canvas, pbx, pby, pbw, pbh)
+
+            paint_section_label(canvas, ui_font, "RECENT ITEMS", 16, recent_label_y, 428)
+            recent_list.paint(canvas, lsx, lsy, lsw, lsh)
+
+            # Dropdown paints LAST among the host-owned widgets, deliberately:
+            # while open, its item list drops down onto whatever is already
+            # there (here, the "Recent items" label and the top of the list
+            # below it), so it has to be the last thing drawn to stay on top
+            # -- the same reason its click_inside is also offered last.
+            accent_dd.paint(canvas, ddx, ddy, ddw, ddh)
+
+            canvas.present()
+            unsafe: SDL_Delay(16 as Uint32)
+
+    canvas.close()
+    print("window closed")

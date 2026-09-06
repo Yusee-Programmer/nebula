@@ -146,7 +146,7 @@ extend OkHandler:
 # the image (no filesystem access wired up yet -- see toolkit/transport/ in
 # the wider project for where that eventually plugs in) and paints it.
 pub export def tauraro_ui_render(fb: Pointer[u32], width: int, height: int, pitch: int) -> void:
-    mut src = "<panel \"flex-col p-4 gap-3 bg-slate\">\n  <text \"text-white\">TAURARO ON UEFI</text>\n  <panel \"flex-row gap-3 h-90\">\n    <panel \"bg-red grow\" />\n    <panel \"bg-green grow\" />\n    <panel \"bg-blue w-60\" />\n  </panel>\n  <panel \"flex-row gap-3 h-40 p-3 bg-steel\">\n    <button \"bg-amber grow\" @on_click(on_ok)>\n      <text \"text-black\">OK</text>\n    </button>\n    <button \"bg-violet grow\" @on_click(on_cancel)>\n      <text \"text-white\">CANCEL</text>\n    </button>\n  </panel>\n</panel>\n"
+    mut src = "<panel \"flex-col p-1 gap-[3px] bg-slate-800\">\n  <text \"text-white\">TAURARO ON UEFI</text>\n  <panel \"flex-row gap-[3px] h-[90px]\">\n    <panel \"bg-red grow\" />\n    <panel \"bg-green grow\" />\n    <panel \"bg-blue w-15\" />\n  </panel>\n  <panel \"flex-row gap-[3px] h-10 p-[3px] bg-slate-700\">\n    <button \"bg-amber grow justify-center items-center\" @on_click(on_ok)>\n      <text \"text-black\">OK</text>\n    </button>\n    <button \"bg-violet grow justify-center items-center\" @on_click(on_cancel)>\n      <text \"text-white\">CANCEL</text>\n    </button>\n  </panel>\n</panel>\n"
 
     mut p = UiParser.init()
     mut tree = p.parse(src)

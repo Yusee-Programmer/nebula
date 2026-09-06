@@ -1,0 +1,74 @@
+# toolkit.ui.radio — one button in a radio group.
+#
+# Host-owned, same pattern as toolkit.ui.checkbox.Checkbox (see that file, and
+# TextInput's header comment, for why: mutable per-instance state has nowhere
+# to live in the rebuilt-from-a-static-string markup tree).
+#
+# There is no RadioGroup class -- "exactly one selected" is enforced by the
+# CALLER, the same way TextInput's own click_inside expects callers to check
+# each field "in a fixed order, so only the last one checked ends up focused
+# if two overlap": call select_only() on the one that was clicked, which also
+# clears every OTHER radio in the group the caller passes in.
+#   mut small = Radio.init(true)
+#   mut medium = Radio.init(false)
+#   mut large = Radio.init(false)
+#   mut group: List[Radio] = [small, medium, large]
+#   ...
+#   mut i = 0
+#   while i < len(group):
+#       if group[i].click_inside(mx, my, rx[i], ry[i], 18, 18):
+#           select_only(group, i)
+#       i = i + 1
+
+from toolkit.render.canvas import Canvas
+from toolkit.ui.interp import fill_circle_aa, fill_circle_ring_aa
+
+pub class Radio:
+    pub selected: bool
+    pub ring:     int   # outer ring color, unselected
+    pub accent:   int   # outer ring + inner dot color, selected
+    pub bg:       int   # interior fill (both states)
+    # See Checkbox.page_bg's comment -- same reason, same default.
+    pub page_bg:  int
+
+extend Radio:
+    pub def init(selected: bool) -> Radio:
+        mut r = Radio()
+        r.selected = selected
+        r.ring = 0x64748B
+        r.accent = 0x3B82F6
+        r.bg = 0xFFFFFF
+        r.page_bg = 0x0B1120
+        return r
+
+    # Unlike Checkbox.click_inside, does NOT flip .selected itself -- a radio
+    # click always means "select ME, deselect the rest of the group", and
+    # only the caller (holding the group) can do the second half. Returns
+    # whether the click landed inside, same as Checkbox/TextInput, so the
+    # caller knows whether to act on it at all.
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        return mx >= x and mx < x + w and my >= y and my < y + h
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        mut r = w / 2
+        if h / 2 < r:
+            r = h / 2
+        mut cx = x + w / 2
+        mut cy = y + h / 2
+
+        mut ring_color = self.ring
+        if self.selected:
+            ring_color = self.accent
+        fill_circle_ring_aa(c, cx, cy, r, 2, self.bg, ring_color, self.page_bg)
+
+        if self.selected:
+            fill_circle_aa(c, cx, cy, r - 5, self.accent, self.bg)
+
+# Selects group[chosen] and clears every other Radio in the same List --
+# a free function, not a method on Radio itself, since it operates on a
+# whole group rather than one instance.
+pub def select_only(group: List[Radio], chosen: int) -> void:
+    mut i = 0
+    while i < len(group):
+        group[i].selected = i == chosen
+        i = i + 1

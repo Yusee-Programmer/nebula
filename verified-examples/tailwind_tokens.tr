@@ -1,0 +1,172 @@
+# verified-examples/tailwind_tokens.tr — the Tailwind token table, asserted.
+#
+# The migration of the existing demos proved the translation is CONSISTENT
+# (every .ui file renders byte-identical PPMs before and after). It could not
+# prove the translation is CORRECT, because the old markup only exercised the
+# handful of tokens that already existed. This file checks the actual pixel
+# values against Tailwind's published scale, plus every token kind the old
+# vocabulary had no way to express.
+#
+#   tauraroc --run verified-examples/tailwind_tokens.tr
+
+from toolkit.ui.style import StyleCache, Style, unset
+from toolkit.ui.style import align_center, align_end, align_between, align_around, align_evenly
+from toolkit.ui.style import align_start, align_stretch, dir_col, dir_row
+from toolkit.ui.scale import spacing_px, radius_px, border_px, no_px, arbitrary_px
+
+mut _pass: int = 0
+mut _fail: int = 0
+
+def check(label: str, got: int, want: int) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def main():
+    print("=== toolkit.ui.scale: the spacing scale ===")
+    # Tailwind spacing is 0.25rem per step = 4px at a 16px root.
+    check("p-0", spacing_px("0"), 0)
+    check("p-px", spacing_px("px"), 1)
+    check("p-0.5", spacing_px("0.5"), 2)
+    check("p-1", spacing_px("1"), 4)
+    check("p-1.5", spacing_px("1.5"), 6)
+    check("p-2", spacing_px("2"), 8)
+    check("p-2.5", spacing_px("2.5"), 10)
+    check("p-3", spacing_px("3"), 12)
+    check("p-3.5", spacing_px("3.5"), 14)
+    check("p-4", spacing_px("4"), 16)
+    check("p-8", spacing_px("8"), 32)
+    check("p-12", spacing_px("12"), 48)
+    check("p-16", spacing_px("16"), 64)
+    check("p-24", spacing_px("24"), 96)
+    check("p-96", spacing_px("96"), 384)
+    # v4 dynamic scale: a step Tailwind v3 did not define still resolves.
+    check("p-13 (v4 dynamic)", spacing_px("13"), 52)
+    # Arbitrary values, with and without the unit.
+    check("p-[17px]", spacing_px("[17px]"), 17)
+    check("p-[460]", spacing_px("[460]"), 460)
+    check("garbage", spacing_px("wat"), no_px())
+
+    print("=== radius and border are their OWN scales ===")
+    check("rounded", radius_px(""), 4)
+    check("rounded-none", radius_px("none"), 0)
+    check("rounded-sm", radius_px("sm"), 2)
+    check("rounded-md", radius_px("md"), 6)
+    check("rounded-lg", radius_px("lg"), 8)
+    check("rounded-xl", radius_px("xl"), 12)
+    check("rounded-2xl", radius_px("2xl"), 16)
+    check("rounded-3xl", radius_px("3xl"), 24)
+    # border-4 is 4 PIXELS, while p-4 is 16px. That asymmetry is Tailwind's.
+    check("border", border_px(""), 1)
+    check("border-2", border_px("2"), 2)
+    check("border-4", border_px("4"), 4)
+    check("border-8", border_px("8"), 8)
+
+    print("=== the palette: 22 hues x 11 shades ===")
+    mut sc = StyleCache.init()
+    mut s = sc.resolve("bg-blue-500")
+    check("bg-blue-500", s.bg, 0x3B82F6)
+    s = sc.resolve("bg-slate-800")
+    check("bg-slate-800", s.bg, 0x1E293B)
+    s = sc.resolve("bg-slate-50")
+    check("bg-slate-50", s.bg, 0xF8FAFC)
+    s = sc.resolve("bg-slate-950")
+    check("bg-slate-950", s.bg, 0x020617)
+    s = sc.resolve("bg-emerald-400")
+    check("bg-emerald-400", s.bg, 0x34D399)
+    s = sc.resolve("bg-rose-950")
+    check("bg-rose-950", s.bg, 0x4C0519)
+    s = sc.resolve("text-neutral-300")
+    check("text-neutral-300", s.fg, 0xD4D4D4)
+    s = sc.resolve("border-fuchsia-600")
+    check("border-fuchsia-600", s.border, 0xC026D3)
+    # A bare hue means shade 500.
+    s = sc.resolve("bg-red")
+    check("bg-red == red-500", s.bg, 0xEF4444)
+    # Keywords and arbitrary hex.
+    s = sc.resolve("bg-white")
+    check("bg-white", s.bg, 0xFFFFFF)
+    s = sc.resolve("bg-black")
+    check("bg-black", s.bg, 0x000000)
+    s = sc.resolve("bg-[#0B1120]")
+    check("bg-[#0B1120]", s.bg, 0x0B1120)
+    s = sc.resolve("bg-#0B1120")
+    check("bg-#0B1120 (legacy)", s.bg, 0x0B1120)
+    # A shade that is not a real step, and an unknown hue, both paint nothing
+    # rather than guessing.
+    s = sc.resolve("bg-blue-501")
+    check("bg-blue-501 -> unset", s.bg, unset())
+    s = sc.resolve("bg-chartreuse-500")
+    check("unknown hue -> unset", s.bg, unset())
+
+    print("=== per-side padding and margins ===")
+    s = sc.resolve("p-4")
+    check("p-4 top", s.pad_t, 16)
+    check("p-4 left", s.pad_l, 16)
+    s = sc.resolve("px-4 py-2")
+    check("px-4 left", s.pad_l, 16)
+    check("px-4 right", s.pad_r, 16)
+    check("py-2 top", s.pad_t, 8)
+    check("py-2 bottom", s.pad_b, 8)
+    s = sc.resolve("p-2 pt-8")
+    check("p-2 pt-8 -> top wins", s.pad_t, 32)
+    check("p-2 pt-8 -> bottom stays", s.pad_b, 8)
+    s = sc.resolve("mt-4 mb-2 mx-8")
+    check("mt-4", s.mar_t, 16)
+    check("mb-2", s.mar_b, 8)
+    check("mx-8 left", s.mar_l, 32)
+    s = sc.resolve("-mt-4")
+    check("-mt-4 (negative)", s.mar_t, 0 - 16)
+
+    print("=== sizing, fractions, gap, flex ===")
+    s = sc.resolve("w-64 h-32")
+    check("w-64", s.w, 256)
+    check("h-32", s.h, 128)
+    s = sc.resolve("w-[460px]")
+    check("w-[460px]", s.w, 460)
+    s = sc.resolve("size-6")
+    check("size-6 w", s.w, 24)
+    check("size-6 h", s.h, 24)
+    s = sc.resolve("w-1/2")
+    check("w-1/2 num", s.w_num, 1)
+    check("w-1/2 den", s.w_den, 2)
+    s = sc.resolve("w-full")
+    check("w-full num", s.w_num, 1)
+    check("w-full den", s.w_den, 1)
+    s = sc.resolve("gap-4")
+    check("gap-4 x", s.gap_x, 16)
+    check("gap-4 y", s.gap_y, 16)
+    s = sc.resolve("gap-x-2 gap-y-8")
+    check("gap-x-2", s.gap_x, 8)
+    check("gap-y-8", s.gap_y, 32)
+    s = sc.resolve("flex-col")
+    check("flex-col", s.dir, dir_col())
+    s = sc.resolve("flex-1")
+    check("flex-1 -> grow", s.grow, 1)
+
+    print("=== alignment ===")
+    s = sc.resolve("justify-around")
+    check("justify-around", s.justify, align_around())
+    s = sc.resolve("justify-evenly")
+    check("justify-evenly", s.justify, align_evenly())
+    s = sc.resolve("justify-between items-end")
+    check("justify-between", s.justify, align_between())
+    check("items-end", s.align, align_end())
+    s = sc.resolve("items-baseline")
+    check("items-baseline -> start", s.align, align_start())
+
+    print("=== unknown tokens are ignored, never fatal ===")
+    # Real Tailwind classes this renderer has no concept of. Each must leave
+    # the style untouched rather than halting or writing a garbage value.
+    s = sc.resolve("text-lg shadow-md opacity-50 z-10 absolute animate-spin p-4")
+    check("p-4 still applied", s.pad_t, 16)
+    check("no font-size side effect", s.w, unset())
+    s = sc.resolve("!!!not-a-class!!!")
+    check("garbage class is inert", s.pad_t, 0)
+
+    print("")
+    print("passed=" + _pass.to_str() + " failed=" + _fail.to_str())
+    if _fail == 0:
+        print("ALL OK")

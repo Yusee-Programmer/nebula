@@ -8,7 +8,7 @@
 # function with this exact signature and the auto-generated boot stub polls
 # EFI_SIMPLE_POINTER_PROTOCOL (mouse, relative deltas -- a plain `-M q35`
 # already provides this via PS/2, no extra qemu flags) and
-# EFI_SIMPLE_TEXT_INPUT_PROTOCOL (keyboard, via ConIn) every ~16ms and calls
+# EFI_SIMPLE_TEXT_INPUT_PROTOCOL (keyboard, via ConIn) every -16ms and calls
 # it with the current input state:
 #
 #   pub export def tauraro_uefi_frame(fb, width, height, pitch,
@@ -146,7 +146,7 @@ mut _it:     Interpreter
 mut _tree:   Pointer[UiNode]
 mut _prev_mouse_down: bool = false
 
-# Called every ~16ms with the UEFI stub's freshly-polled input state.
+# Called every -16ms with the UEFI stub's freshly-polled input state.
 pub export def tauraro_uefi_frame(fb: Pointer[u32], width: int, height: int, pitch: int, mouse_x: int, mouse_y: int, mouse_down: bool, has_key: bool, key_code: int) -> bool:
     mut canvas = GopCanvas.init(fb, width, height, pitch)
 
@@ -156,7 +156,7 @@ pub export def tauraro_uefi_frame(fb: Pointer[u32], width: int, height: int, pit
         # fill_rect/set_pixel (toolkit/ui/interp.tr's paint_rounded_rect),
         # so this native-like chrome is identical on UEFI's GOP framebuffer
         # with no backend-specific code, same as everything else here.
-        mut src = "<panel \"flex-col p-4 gap-3 bg-slate\" @on_key(on_key)>\n  <text \"text-white\">UEFI LIVE INPUT -- click, type, watch the indicators</text>\n  <panel \"flex-row gap-3 h-60\">\n    <panel \"bg-red grow radius-8\" />\n    <panel \"bg-green grow radius-8\" />\n    <panel \"bg-blue w-60 radius-8\" />\n  </panel>\n  <panel \"flex-row gap-3 h-40 p-3 bg-steel\">\n    <button \"bg-amber grow border-white bw-2 radius-8\" @on_click(on_ok)>\n      <text \"text-black\">CLICK ME</text>\n    </button>\n    <panel \"bg-violet w-90 radius-8\" />\n  </panel>\n  <panel \"flex-row gap-2 h-30 p-3 bg-mist radius-4\">\n    <text \"text-black\">clicks (amber) / last key (green flash) below</text>\n  </panel>\n</panel>\n"
+        mut src = "<panel \"flex-col p-1 gap-[3px] bg-slate-800\" @on_key(on_key)>\n  <text \"text-white\">UEFI LIVE INPUT -- click, type, watch the indicators</text>\n  <panel \"flex-row gap-[3px] h-15\">\n    <panel \"bg-red grow rounded-lg\" />\n    <panel \"bg-green grow rounded-lg\" />\n    <panel \"bg-blue w-15 rounded-lg\" />\n  </panel>\n  <panel \"flex-row gap-[3px] h-10 p-[3px] bg-slate-700\">\n    <button \"bg-amber grow border-white border-2 rounded-lg justify-center items-center\" @on_click(on_ok)>\n      <text \"text-black\">CLICK ME</text>\n    </button>\n    <panel \"bg-violet w-[90px] rounded-lg\" />\n  </panel>\n  <panel \"flex-row gap-0.5 h-[30px] p-[3px] bg-slate-400 rounded\">\n    <text \"text-black\">clicks (amber) / last key (green flash) below</text>\n  </panel>\n</panel>\n"
         mut p = UiParser.init()
         _tree = p.parse(src)
         _it = Interpreter.init()

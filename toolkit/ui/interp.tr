@@ -39,6 +39,13 @@ pub class Interpreter:
     pub hover_x:  int
     pub hover_y:  int
     pub pressed:  bool
+    # The flat color the canvas was actually cleared to before this frame's
+    # render() call -- the root of the "what's behind me" chain every panel's
+    # anti-aliased edges blend against (see paint()'s own comment for the
+    # full mechanism). Defaults to this project's common dark demo
+    # background; set it directly if a caller clears its canvas to something
+    # else, the same way each widget's own `page_bg` field works.
+    pub root_bg:  int
 
 extend Interpreter:
     pub def init() -> Interpreter:
@@ -51,6 +58,7 @@ extend Interpreter:
         it.hover_x = 0 - 1
         it.hover_y = 0 - 1
         it.pressed = false
+        it.root_bg = 0x0B1120
         return it
 
     # Takes an already-interface-typed handler; callers should go through the
@@ -78,9 +86,24 @@ extend Interpreter:
         self.root = layout_tree(node, self.cache, c.width(), c.height())
         self.has_root = true
         self.renders = self.renders + 1
-        self.paint(self.root, c)
+        self.paint(self.root, c, self.root_bg)
 
-    def paint(self, box: LayoutBox, c: Canvas) -> void:
+    # `ambient_bg` is the flat color already sitting behind THIS box, before
+    # anything below paints over it -- the canvas clear color at the root,
+    # cascading down as each panel's own resolved background for its
+    # children (a panel with no bg of its own is transparent, so its
+    # children still see through to WHATEVER is behind the panel, same as
+    # real UI layering). This is what makes anti-aliased rounded corners work
+    # for ordinary markup panels/buttons, not just the hand-painted widgets
+    # (toolkit/ui/checkbox.tr and friends) that already had a `page_bg` field
+    # for exactly this: paint_rounded_rect_aa/fill_circle_aa need to know
+    # what color to blend an edge pixel TOWARD, and Canvas.set_pixel has no
+    # alpha channel or destination read-back to find that out on its own
+    # (see paint_rounded_rect_aa's own comment for the full reasoning) --
+    # bare-metal/UEFI framebuffers are plain write-only memory and genuinely
+    # cannot blend even in principle, so this had to be solved by tracking
+    # the answer ourselves, not by asking the backend.
+    def paint(self, box: LayoutBox, c: Canvas, ambient_bg: int) -> void:
         # Native-like hover/pressed feedback: only for boxes an author wired
         # to an event (event_name != "") -- a plain decorative panel never
         # darkens just because the cursor happens to be over it.
@@ -96,68 +119,61 @@ extend Interpreter:
             if border != unset():
                 border = darken_color(border, pct)
 
+        # What this box's OWN children (and its own text, if it's a text
+        # node) will see as their ambient backdrop: this box's resolved fill
+        # if it painted one, otherwise unchanged -- a transparent panel is
+        # exactly that, transparent, so whatever was behind IT is still
+        # behind its children too.
+        mut child_ambient = ambient_bg
+        if bg != unset():
+            child_ambient = bg
+
         mut has_border = border != unset() and box.style.border_w > 0
         if has_border:
-            # Outline via two nested fills, not a stroke primitive: Canvas only
-            # exposes fill_rect/set_pixel (see toolkit/render/canvas.tr -- kept
-            # deliberately minimal so every backend, including the bare-metal
-            # and UEFI framebuffer ones, implements the same four methods).
-            # Paint the full box in the border color, then paint an inset
-            # box (by border_w on every side) in the background color on top,
-            # leaving exactly a border_w-wide ring visible.
-            paint_rounded_rect(c, box.x, box.y, box.w, box.h, box.style.radius, border)
-            if bg != unset():
-                mut bw = box.style.border_w
-                mut inner_r = box.style.radius - bw
-                if inner_r < 0:
-                    inner_r = 0
-                mut iw = box.w - bw * 2
-                mut ih = box.h - bw * 2
-                if iw > 0 and ih > 0:
-                    paint_rounded_rect(c, box.x + bw, box.y + bw, iw, ih, inner_r, bg)
+            # Fill + ring + outer edge in one pass -- see
+            # paint_rounded_box_aa's comment for why this is not two nested
+            # paint_rounded_rect_aa calls (the short version: two overlapping
+            # antialiased ramps cannot be made to agree, and leave a halo
+            # tracing every corner).
+            #
+            # A bordered box with no background of its own is a genuine
+            # outline: the ring's inside shows whatever was already behind
+            # the box, so `ambient_bg` is the correct fill to blend toward.
+            mut inner_fill = bg
+            if bg == unset():
+                inner_fill = ambient_bg
+            paint_rounded_box_aa(c, box.x, box.y, box.w, box.h, box.style.radius, box.style.border_w, inner_fill, border, ambient_bg)
         elif bg != unset():
-            paint_rounded_rect(c, box.x, box.y, box.w, box.h, box.style.radius, bg)
+            paint_rounded_rect_aa(c, box.x, box.y, box.w, box.h, box.style.radius, bg, ambient_bg)
 
         if box.kind == kind_text():
-            self.paint_text(box, c)
+            # Text sits directly on THIS box's own resolved surface (its own
+            # bg if it set one, otherwise whatever shows through it) -- not
+            # on `ambient_bg`, which is what's behind the box as a WHOLE, a
+            # different thing whenever the box itself painted something.
+            self.paint_text(box, c, child_ambient)
 
         mut i = 0
         while i < len(box.children):
-            self.paint(box.children[i], c)
+            self.paint(box.children[i], c, child_ambient)
             i = i + 1
 
-    # (paint_rounded_rect / paint_corner are free functions below -- see their
-    # own comments for why: Canvas has no fill-rounded-rect or circle
-    # primitive, deliberately, so this stays plain fill_rect/set_pixel calls
-    # a method can make just as easily as a free function could; they're
-    # free functions purely to sit next to hit_test/find_handler_by_event,
-    # the toolkit's other tree/paint free functions, not because of the
-    # method-vs-free-function recursion gotcha those two have (this isn't
-    # recursive).
+    # (paint_rounded_rect_aa / paint_corner_aa are free functions below --
+    # see their own comments for why: Canvas has no fill-rounded-rect or
+    # circle primitive, deliberately, so this stays plain fill_rect/set_pixel
+    # calls a method can make just as easily as a free function could;
+    # they're free functions purely to sit next to hit_test/
+    # find_handler_by_event, the toolkit's other tree/paint free functions,
+    # not because of the method-vs-free-function recursion gotcha those two
+    # have (this isn't recursive).
 
-    # Real glyph painting from the baked bitmap font (toolkit/text/), one
-    # pixel at a time via Canvas.set_pixel -- an irregular glyph shape has no
-    # rectangle decomposition worth the bookkeeping at this cell size. Layout
-    # already reserves exactly `font.cell_w() x font.cell_h()` per character
-    # (toolkit.layout.flex's glyph_w()/glyph_h() are wired to the same baked
-    # font data), so glyph positions here match where layout placed them with
-    # no separate metrics to keep in sync.
-    def paint_text(self, box: LayoutBox, c: Canvas) -> void:
-        mut cw = self.font.cell_w()
-        mut ch = self.font.cell_h()
-        mut n = Str.len(box.text)
-        mut i = 0
-        while i < n:
-            mut codepoint = Str.char_at(box.text, i)
-            mut col = 0
-            while col < cw:
-                mut row = 0
-                while row < ch:
-                    if self.font.pixel_set(codepoint, col, row):
-                        c.set_pixel(box.x + i * cw + col, box.y + row, box.style.fg)
-                    row = row + 1
-                col = col + 1
-            i = i + 1
+    # Real glyph painting from the baked antialiased font (toolkit/text/),
+    # blended per-pixel via draw_text against `own_bg` -- see draw_text's own
+    # comment for the blend mechanism, which is identical to
+    # fill_circle_aa/paint_rounded_rect_aa's (a caller-known flat backdrop,
+    # since Canvas.set_pixel has no alpha channel to blend with on its own).
+    def paint_text(self, box: LayoutBox, c: Canvas, own_bg: int) -> void:
+        draw_text(c, self.font, box.text, box.x, box.y, box.style.fg, own_bg)
 
     # --- events ----------------------------------------------------------
 
@@ -271,6 +287,388 @@ def paint_corner(c: Canvas, ax: int, ay: int, r: int, color: int, inner_right: b
                 c.set_pixel(ax + xx, ay + yy, color)
             xx = xx + 1
         yy = yy + 1
+
+# Anti-aliased rounded rect -- same fg/bg-blend approach as fill_circle_aa
+# (see its comment for the underlying reasoning: no real alpha channel
+# anywhere in Canvas, so this blends the edge colors itself, in Tauraro,
+# before ever calling set_pixel). Only the four corners actually need
+# softening -- the straight edges paint_rounded_rect already draws are
+# axis-aligned rects, which are already pixel-exact with no jagged edge to
+# begin with -- so this reuses paint_rounded_rect's own straight-fill calls
+# unchanged and only swaps paint_corner for an anti-aliased corner.
+#
+# `bg` must be the solid color already sitting where this shape is about to
+# be drawn (its own container's flat backdrop) for the blend to be correct --
+# exactly the same requirement fill_circle_aa has, and the same reason: nothing
+# here can read the real destination pixel back to find out.
+pub def paint_rounded_rect_aa(c: Canvas, x: int, y: int, w: int, h: int, radius: int, fg: int, bg: int) -> void:
+    if w <= 0:
+        return
+    if h <= 0:
+        return
+    mut r = radius
+    if r < 0:
+        r = 0
+    if r * 2 > w:
+        r = w / 2
+    if r * 2 > h:
+        r = h / 2
+    if r <= 0:
+        c.fill_rect(x, y, w, h, fg)
+        return
+
+    c.fill_rect(x, y + r, w, h - r * 2, fg)
+    c.fill_rect(x + r, y, w - r * 2, r, fg)
+    c.fill_rect(x + r, y + h - r, w - r * 2, r, fg)
+
+    paint_corner_aa(c, x, y, r, fg, bg, true, true)
+    paint_corner_aa(c, x + w - r, y, r, fg, bg, false, true)
+    paint_corner_aa(c, x, y + h - r, r, fg, bg, true, false)
+    paint_corner_aa(c, x + w - r, y + h - r, r, fg, bg, false, false)
+
+# Anti-aliased counterpart to paint_corner -- same r*4 quarter-pixel
+# supersampling as fill_circle_aa's pixel_coverage/mix_color, applied to a
+# quarter-circle instead of a full one.
+def paint_corner_aa(c: Canvas, ax: int, ay: int, r: int, fg: int, bg: int, inner_right: bool, inner_bottom: bool) -> void:
+    mut center_x = 0
+    if inner_right:
+        center_x = r
+    mut center_y = 0
+    if inner_bottom:
+        center_y = r
+    mut r4sq = (r * 4) * (r * 4)
+
+    mut yy = 0 - 1
+    while yy <= r:
+        mut xx = 0 - 1
+        while xx <= r:
+            mut coverage = pixel_coverage(xx - center_x, yy - center_y, r4sq)
+            if coverage == 16:
+                c.set_pixel(ax + xx, ay + yy, fg)
+            elif coverage > 0:
+                c.set_pixel(ax + xx, ay + yy, mix_color(fg, bg, coverage))
+            xx = xx + 1
+        yy = yy + 1
+
+# A bordered rounded box -- fill, ring, and outer edge resolved in ONE pass.
+#
+# The obvious way to draw this is two calls to paint_rounded_rect_aa: the
+# whole box in `border`, then an inset box in `fill` on top, leaving a ring.
+# That is what this toolkit did until 2026-09-05, and it ghosts. The reason
+# is worth stating once, here, because it is not obvious: the inset fill's
+# antialiased corner ramp blends toward whatever the caller SAYS is behind
+# it, and the honest answer there is "the border color" -- but only where
+# the ring is actually solid. Wherever the two ramps overlap (which is
+# always, once border_w is 1-2px against a radius of 8-12), the pixels under
+# the inner ramp are themselves already a border/ambient MIX, not solid
+# border, so blending toward solid border overshoots and leaves a visible
+# lighter halo tracing each corner. No choice of backdrop argument fixes it;
+# the information needed simply isn't available to the second call.
+#
+# So the ring is resolved per-subsample instead, exactly as RASTERIZER.md 5c
+# prescribes: one pass over each corner asks each of the 16 subsamples which
+# of THREE regions it lands in (inside the inner radius -> fill, between the
+# radii -> border, outside -> ambient) and mixes all three at once. The two
+# ramps can't disagree because there are no longer two of them.
+#
+# The straight edges need none of this -- they're axis-aligned rectangles
+# with no curved boundary to soften -- so they stay plain exact fill_rect
+# calls and only the four corner squares pay the 16x supersampling cost.
+pub def paint_rounded_box_aa(c: Canvas, x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, border: int, ambient: int) -> void:
+    if w <= 0:
+        return
+    if h <= 0:
+        return
+
+    mut r = radius
+    if r < 0:
+        r = 0
+    if r * 2 > w:
+        r = w / 2
+    if r * 2 > h:
+        r = h / 2
+
+    mut b = border_w
+    if b < 0:
+        b = 0
+    if b == 0:
+        paint_rounded_rect_aa(c, x, y, w, h, r, fill, ambient)
+        return
+    # A border thick enough to meet itself leaves no interior at all -- draw
+    # it as a solid box in the border color rather than emitting a
+    # zero-or-negative-sized inner fill.
+    if b * 2 >= w or b * 2 >= h:
+        paint_rounded_rect_aa(c, x, y, w, h, r, border, ambient)
+        return
+
+    if r <= 0:
+        c.fill_rect(x, y, w, b, border)
+        c.fill_rect(x, y + h - b, w, b, border)
+        c.fill_rect(x, y + b, b, h - b * 2, border)
+        c.fill_rect(x + w - b, y + b, b, h - b * 2, border)
+        c.fill_rect(x + b, y + b, w - b * 2, h - b * 2, fill)
+        return
+
+    # Border strips along the four straight edges, between the corner squares.
+    c.fill_rect(x + r, y, w - r * 2, b, border)
+    c.fill_rect(x + r, y + h - b, w - r * 2, b, border)
+    c.fill_rect(x, y + r, b, h - r * 2, border)
+    c.fill_rect(x + w - b, y + r, b, h - r * 2, border)
+
+    # Interior fill as a plus shape: the full-width middle band, plus the two
+    # narrower strips above and below it that the corner squares don't reach.
+    c.fill_rect(x + b, y + r, w - b * 2, h - r * 2, fill)
+    c.fill_rect(x + r, y + b, w - r * 2, r - b, fill)
+    c.fill_rect(x + r, y + h - r, w - r * 2, r - b, fill)
+
+    paint_border_corner_aa(c, x, y, r, b, fill, border, ambient, true, true)
+    paint_border_corner_aa(c, x + w - r, y, r, b, fill, border, ambient, false, true)
+    paint_border_corner_aa(c, x, y + h - r, r, b, fill, border, ambient, true, false)
+    paint_border_corner_aa(c, x + w - r, y + h - r, r, b, fill, border, ambient, false, false)
+
+# One corner of paint_rounded_box_aa. Same square/anchor/inner_right/
+# inner_bottom convention as paint_corner and paint_corner_aa (see
+# paint_corner's comment for what those two flags mean geometrically).
+#
+# The inner rounded rect is inset by `b` on every side with radius `r - b`,
+# which puts its corner arc's center at exactly the same point as the outer
+# arc's -- the two circles are concentric -- so classifying a subsample is a
+# plain annulus test against two radii sharing one center, not two separate
+# distance fields.
+def paint_border_corner_aa(c: Canvas, ax: int, ay: int, r: int, b: int, fill: int, border: int, ambient: int, inner_right: bool, inner_bottom: bool) -> void:
+    mut center_x = 0
+    if inner_right:
+        center_x = r
+    mut center_y = 0
+    if inner_bottom:
+        center_y = r
+
+    mut ir = r - b
+    if ir < 0:
+        ir = 0
+    mut r4sq = (r * 4) * (r * 4)
+    mut ir4sq = (ir * 4) * (ir * 4)
+
+    mut yy = 0 - 1
+    while yy <= r:
+        mut xx = 0 - 1
+        while xx <= r:
+            mut dx = xx - center_x
+            mut dy = yy - center_y
+            mut co = pixel_coverage(dx, dy, r4sq)
+            if co > 0:
+                mut ci = pixel_coverage(dx, dy, ir4sq)
+                if ci == 16:
+                    c.set_pixel(ax + xx, ay + yy, fill)
+                elif co == 16 and ci == 0:
+                    c.set_pixel(ax + xx, ay + yy, border)
+                else:
+                    c.set_pixel(ax + xx, ay + yy, mix3_color(fill, border, ambient, ci, co))
+            xx = xx + 1
+        yy = yy + 1
+
+# Three-way weighted mix for a pixel straddling fill, border ring, and
+# whatever is behind the box. `ci` subsamples landed inside the inner
+# radius, `co` inside the outer; because the two circles are concentric and
+# the inner one is smaller, ci is always a subset of co, so the three weights
+# (ci, co - ci, 16 - co) are non-negative and sum to exactly 16. Same `+ 8`
+# round-to-nearest as mix_color, for the same reason.
+def mix3_color(fill: int, border: int, ambient: int, ci: int, co: int) -> int:
+    mut wf = ci
+    mut wb = co - ci
+    mut wa = 16 - co
+    mut r = (red_of(fill) * wf + red_of(border) * wb + red_of(ambient) * wa + 8) / 16
+    mut g = (green_of(fill) * wf + green_of(border) * wb + green_of(ambient) * wa + 8) / 16
+    mut b = (blue_of(fill) * wf + blue_of(border) * wb + blue_of(ambient) * wa + 8) / 16
+    return rgb(r, g, b)
+
+# Draws one line of text at the baked font's cell size, top-left anchored at
+# (x, y) -- the ONE glyph-painting implementation Interpreter.paint_text,
+# TextInput.paint, and every text-drawing widget (dropdown/tabs/list) all
+# call, rather than each keeping its own copy (there used to be three
+# separate copies of this loop; consolidated 2026-09-05 when the font
+# changed from a 1-bit mask to a 0-16 coverage atlas -- three places
+# independently relearning the same blend math was exactly the kind of
+# duplication not worth carrying forward).
+#
+# `bg` is blended against exactly the way fill_circle_aa/paint_rounded_rect_aa
+# blend edge pixels: the baked atlas (toolkit/text/font_data.tr) stores a
+# real 0-16 antialiased coverage level per pixel, not a bit, and
+# Canvas.set_pixel has no alpha channel of its own to do that blending for
+# us -- so it's computed here, in Tauraro, before the one final solid color
+# is ever handed to set_pixel. `bg` must be the flat color already sitting
+# where this text is about to be drawn (see paint_rounded_rect_aa's own
+# comment for the same requirement, same reason).
+pub def draw_text(c: Canvas, font: Font, text: str, x: int, y: int, fg: int, bg: int) -> void:
+    mut cw = font.cell_w()
+    mut ch = font.cell_h()
+    mut n = Str.len(text)
+    mut i = 0
+    while i < n:
+        mut codepoint = Str.char_at(text, i)
+        mut col = 0
+        while col < cw:
+            mut row = 0
+            while row < ch:
+                mut coverage = font.pixel_coverage(codepoint, col, row)
+                if coverage == 16:
+                    c.set_pixel(x + i * cw + col, y + row, fg)
+                elif coverage > 0:
+                    c.set_pixel(x + i * cw + col, y + row, mix_color(fg, bg, coverage))
+                row = row + 1
+            col = col + 1
+        i = i + 1
+
+# A filled circle, via the exact same midpoint-in-a-square test paint_corner
+# already uses for a rounded rect's quarter-circle corners -- pulled out as
+# its own function because the new widgets (radio button, switch knob, slider
+# thumb) all want a plain full circle, not one quartered off against two
+# straight edges. Same per-pixel set_pixel cost as paint_corner, same reason
+# it stays that way: Canvas has no circle primitive, deliberately (see
+# toolkit/render/canvas.tr).
+#
+# Hard-edged -- every pixel is fully `color` or fully untouched, which is
+# what makes a small circle look visibly stepped/jagged at these sizes
+# (a radio dot, a switch knob). See fill_circle_aa below for the smoothed
+# version; this one stays as the cheap primitive it always was, for anything
+# that doesn't care.
+pub def fill_circle(c: Canvas, cx: int, cy: int, r: int, color: int) -> void:
+    if r <= 0:
+        return
+    mut yy = 0 - r
+    while yy <= r:
+        mut xx = 0 - r
+        while xx <= r:
+            if xx * xx + yy * yy <= r * r:
+                c.set_pixel(cx + xx, cy + yy, color)
+            xx = xx + 1
+        yy = yy + 1
+
+# Anti-aliased filled circle. Canvas.set_pixel takes one solid, final color --
+# there is no alpha channel or destination read-back anywhere in the Canvas
+# interface (deliberately minimal, see toolkit/render/canvas.tr; the
+# bare-metal/UEFI framebuffer backends are plain write-only memory, they
+# cannot blend even if asked to) -- so this does the blending itself, in
+# Tauraro, before the pixel is ever written: each boundary pixel is
+# supersampled on a 4x4 subgrid, and its OWN color is computed as a
+# straight-line mix between `fg` and the caller-supplied `bg` weighted by how
+# many of those 16 subsamples actually fall inside the circle. A pixel fully
+# inside gets pure `fg`; fully outside is skipped entirely (never touched, so
+# whatever was already there -- which had better be `bg`, or close to it --
+# still shows); only the ring of boundary pixels costs the extra 16x work and
+# gets an intermediate shade. This is exactly what real anti-aliasing is
+# doing under the hood, just computed with integer math against a known flat
+# background instead of a hardware alpha blend -- correct as long as `bg`
+# genuinely is the solid color already sitting under this circle (every call
+# site here paints its own flat backdrop first, then the circle on top of
+# it, so that always holds).
+pub def fill_circle_aa(c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void:
+    if r <= 0:
+        return
+    # Everything below works in quarter-pixel units (scale factor 4), so a
+    # circle of radius `r` pixels becomes radius `r*4` in this scaled space,
+    # and each subsample sits at an eighth-pixel offset within its own pixel
+    # cell -- integer math throughout, no float anywhere.
+    mut r4 = r * 4
+    mut r4sq = r4 * r4
+
+    mut yy = 0 - r - 1
+    while yy <= r + 1:
+        mut xx = 0 - r - 1
+        while xx <= r + 1:
+            mut coverage = pixel_coverage(xx, yy, r4sq)
+            if coverage == 16:
+                c.set_pixel(cx + xx, cy + yy, fg)
+            elif coverage > 0:
+                c.set_pixel(cx + xx, cy + yy, mix_color(fg, bg, coverage))
+            xx = xx + 1
+        yy = yy + 1
+
+# The circular counterpart to paint_rounded_box_aa: a filled disc with a
+# ring around it, all three regions resolved per-subsample in one pass.
+# Exists for the same reason and fixes the same defect -- a radio button and
+# a slider thumb were each drawn as two overlapping fill_circle_aa calls, an
+# outer disc in the ring color and a smaller one in the fill color, and the
+# inner disc's antialiased rim blended toward solid ring color over pixels
+# that were themselves already a ring/ambient mix. On a 9px radio dot that
+# halo is a meaningful fraction of the whole widget.
+pub def fill_circle_ring_aa(c: Canvas, cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> void:
+    if r <= 0:
+        return
+    mut rw = ring_w
+    if rw < 0:
+        rw = 0
+    if rw == 0:
+        fill_circle_aa(c, cx, cy, r, fill, ambient)
+        return
+    if rw >= r:
+        fill_circle_aa(c, cx, cy, r, ring, ambient)
+        return
+
+    mut ir = r - rw
+    mut r4sq = (r * 4) * (r * 4)
+    mut ir4sq = (ir * 4) * (ir * 4)
+
+    mut yy = 0 - r - 1
+    while yy <= r + 1:
+        mut xx = 0 - r - 1
+        while xx <= r + 1:
+            mut co = pixel_coverage(xx, yy, r4sq)
+            if co > 0:
+                mut ci = pixel_coverage(xx, yy, ir4sq)
+                if ci == 16:
+                    c.set_pixel(cx + xx, cy + yy, fill)
+                elif co == 16 and ci == 0:
+                    c.set_pixel(cx + xx, cy + yy, ring)
+                else:
+                    c.set_pixel(cx + xx, cy + yy, mix3_color(fill, ring, ambient, ci, co))
+            xx = xx + 1
+        yy = yy + 1
+
+# How many of a pixel's 4x4=16 subsamples fall within radius-squared `r4sq`
+# (already scaled to quarter-pixel units), for the pixel at offset (xx,yy)
+# from the circle's center. Subsample offsets -3,-1,1,3 (in quarter-pixel
+# units) place four samples per axis at the pixel's 1/8, 3/8, 5/8, 7/8 points
+# -- a standard, cheap, integer-only supersampling grid.
+def pixel_coverage(xx: int, yy: int, r4sq: int) -> int:
+    mut count = 0
+    mut sub_y = 0
+    while sub_y < 4:
+        mut oy = sub_y * 2 - 3
+        mut sy = yy * 4 + oy
+        mut sub_x = 0
+        while sub_x < 4:
+            mut ox = sub_x * 2 - 3
+            mut sx = xx * 4 + ox
+            if sx * sx + sy * sy <= r4sq:
+                count = count + 1
+            sub_x = sub_x + 1
+        sub_y = sub_y + 1
+    return count
+
+# Straight-line per-channel mix of fg and bg, weighted by coverage/16 --
+# coverage==16 (fully inside) is handled as a fast path by the caller and
+# never reaches here; this only ever blends a genuine partial-coverage edge
+# pixel.
+#
+# The `+ 8` before the divide is the rounding correction, not decoration:
+# `(x + 2^(n-1)) / 2^n` rounds to nearest where a bare `/ 16` truncates
+# toward zero, which biases EVERY blended pixel about half a level toward
+# black. One edge pixel wouldn't matter; a whole UI's worth of edges reads
+# as a faint dark fringe around every rounded corner and every glyph.
+# (RASTERIZER.md 5d -- the same reason its blend_channel adds 128 before
+# dividing by 255.)
+def mix_color(fg: int, bg: int, coverage: int) -> int:
+    mut fr = red_of(fg)
+    mut fgc = green_of(fg)
+    mut fb = blue_of(fg)
+    mut br = red_of(bg)
+    mut bgc = green_of(bg)
+    mut bb = blue_of(bg)
+    mut r = (fr * coverage + br * (16 - coverage) + 8) / 16
+    mut g = (fgc * coverage + bgc * (16 - coverage) + 8) / 16
+    mut b = (fb * coverage + bb * (16 - coverage) + 8) / 16
+    return rgb(r, g, b)
 
 # Deepest-first hit test: the innermost box containing the point that names a
 # handler wins, which is what makes a button inside a panel behave.

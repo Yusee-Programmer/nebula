@@ -1,0 +1,94 @@
+# toolkit.ui.tabs — a row of labels, one selected.
+#
+# Host-owned, same rationale as every widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). Deliberately does NOT hold or swap any
+# content itself -- a tab strip only ever needs to answer "which index is
+# selected"; what to show for that index is a decision the CALLER already has
+# to make anyway (which of several `<panel>` trees to render). Wire it as:
+#
+#   mut tabs = Tabs.init(["Profile", "Notifications", "Billing"], 0)
+#   mut trees: List[Pointer[UiNode]] = [profile_tree, notif_tree, billing_tree]
+#   ...
+#   if clicked: tabs.click_inside(mx, my, fx, fy, fw, fh)
+#   ...
+#   render_to(it, trees[tabs.selected_index], canvas)   # the SAME live
+#   tabs.paint(canvas, fx, fy, fw, fh)                   # Interpreter, a
+#                                                          # different tree --
+#                                                          # the exact pattern
+#                                                          # examples/hosted_demo
+#                                                          # already uses for
+#                                                          # live-reload.
+
+from toolkit.render.canvas import Canvas
+from toolkit.text.font import Font
+from toolkit.ui.interp import draw_text
+from string.str import Str
+
+pub class Tabs:
+    pub labels:         List[str]
+    pub selected_index: int
+    pub fg:             int
+    pub fg_selected:    int
+    pub underline:      int
+    pub font:           Font
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
+    # default. A tab strip paints no background of its own, so its labels sit
+    # directly on whatever the page behind it is.
+    pub page_bg:        int
+
+extend Tabs:
+    pub def init(labels: List[str], selected_index: int) -> Tabs:
+        mut t = Tabs()
+        t.labels = labels
+        t.selected_index = selected_index
+        t.fg = 0x94A3B8
+        t.fg_selected = 0xF8FAFC
+        t.underline = 0x3B82F6
+        t.font = Font.load()
+        t.page_bg = 0x0B1120
+        return t
+
+    def slot_w(self, w: int) -> int:
+        mut n = len(self.labels)
+        if n <= 0:
+            return w
+        return w / n
+
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        if mx < x or mx >= x + w or my < y or my >= y + h:
+            return false
+        mut sw = self.slot_w(w)
+        if sw <= 0:
+            return false
+        mut idx = (mx - x) / sw
+        if idx >= len(self.labels):
+            idx = len(self.labels) - 1
+        self.selected_index = idx
+        return true
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        mut sw = self.slot_w(w)
+        mut cw = self.font.cell_w()
+        mut ch = self.font.cell_h()
+
+        mut i = 0
+        while i < len(self.labels):
+            mut label = self.labels[i]
+            mut slot_x = x + sw * i
+            mut text_w = Str.len(label) * cw
+            mut tx = slot_x + (sw - text_w) / 2
+            mut ty = y + (h - ch) / 2 - 3
+
+            mut color = self.fg
+            if i == self.selected_index:
+                color = self.fg_selected
+            draw_text(c, self.font, label, tx, ty, color, self.page_bg)
+
+            if i == self.selected_index:
+                mut bar_w = text_w
+                if bar_w > sw - 8:
+                    bar_w = sw - 8
+                mut bar_x = slot_x + (sw - bar_w) / 2
+                c.fill_rect(bar_x, y + h - 3, bar_w, 3, self.underline)
+
+            i = i + 1

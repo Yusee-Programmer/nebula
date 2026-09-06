@@ -1,0 +1,54 @@
+# toolkit.ui.progress — a value display bar, no input at all.
+#
+# The simplest of the host-owned widgets (see toolkit.ui.checkbox.Checkbox for
+# the "why host-owned" rationale, which applies here too -- value is
+# per-instance mutable state): there is no click_inside/handle_key, because
+# nothing about a progress bar is ever clicked or typed into. The host just
+# calls set_value() whenever the underlying quantity changes and paints it
+# every frame like everything else.
+#
+#   mut download = ProgressBar.init(0)
+#   ...
+#   download.set_value(percent_done)
+#   download.paint(canvas, fx, fy, 300, 12)
+
+from toolkit.render.canvas import Canvas
+from toolkit.ui.interp import paint_rounded_rect_aa
+
+pub class ProgressBar:
+    pub value: int   # 0..100, clamped by set_value
+    pub track: int
+    pub fill:  int
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
+    # default.
+    pub page_bg: int
+
+extend ProgressBar:
+    pub def init(value: int) -> ProgressBar:
+        mut p = ProgressBar()
+        p.track = 0xE2E8F0
+        p.fill = 0x22C55E
+        p.value = 0
+        p.page_bg = 0x0B1120
+        p.set_value(value)
+        return p
+
+    pub def set_value(self, value: int) -> void:
+        mut v = value
+        if v < 0:
+            v = 0
+        if v > 100:
+            v = 100
+        self.value = v
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        mut r = h / 2
+        paint_rounded_rect_aa(c, x, y, w, h, r, self.track, self.page_bg)
+
+        mut fw = w * self.value / 100
+        # Below one diameter wide, a rounded rect clamps its own radius to
+        # half its width (see paint_rounded_rect_aa) rather than drawing
+        # something wider than tall, so this doesn't need its own special
+        # case for a near-empty bar -- it just becomes a small circle-ish cap.
+        if fw > 0:
+            paint_rounded_rect_aa(c, x, y, fw, h, r, self.fill, self.track)

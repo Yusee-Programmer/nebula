@@ -1,12 +1,32 @@
 # Project memory — read this first
 
-This is a from-scratch project: a declarative, Tailwind-style UI toolkit written in the
-**Tauraro** language (github.com/tauraro/tauraro), interpreted at runtime rather than compiled
-in, targeting both a hosted dev loop and eventually bare-metal / OS-level rendering. Full
-rationale and phased plan: `docs/proposal/proposal-v2-runtime-interpreter.md` — read that before
-writing code, it's the actual spec this scaffold was generated from.
+**Nebula is a cross-platform GUI engine with its own declarative UI syntax, written in the
+Tauraro language** (github.com/tauraro/tauraro), interpreted at runtime rather than compiled
+in. The goal is **write once, run anywhere: browser, desktop, mobile, embedded, bare metal,
+UEFI — up to and including an operating system's own interface.**
 
-Everything below is what a prior session (Claude, in Cowork) verified about the Tauraro
+Full rationale, current status and the phased plan:
+**`docs/proposal/proposal-v3-cross-platform-engine.md`** — read that before writing code, it
+is the current spec. (`proposal-v2-runtime-interpreter.md` is superseded: it framed this as a
+bare-metal toolkit with a dev loop attached, which turned out to be too narrow a reading of
+what the architecture supports.)
+
+**The load-bearing architectural claim:** everything above the pixel is platform-agnostic, and
+a new platform costs exactly one `Canvas` implementation (four methods —
+`width`/`height`/`fill_rect`/`set_pixel`, no alpha, no read-back) plus an input source. Parser,
+style resolution, layout, interpreter, rasterizer, font and all nine widgets never learn which
+platform they are on. This is verified, not aspirational: four backends sharing no code below
+`Canvas` are running today, and the UEFI and desktop renders are pixel-identical.
+
+**And it is reachable everywhere**, because `tauraroc --target` already cross-compiles to
+`wasm`, `wasm-wasi`, `android-*`, `ios`, `macos-*`, `linux-*`, `windows-*`, `embedded-*` and
+`uefi-x64`. Browser and mobile are *backend* work, not compiler work. Run `tauraroc --help` to
+confirm the list.
+
+**Templating: use `templa`** (the project's own engine), not Jinja — Jinja was proposed and
+explicitly rejected on 2026-09-06. Integration is deferred; keep the expansion step pluggable.
+
+Everything below is what prior sessions verified about the Tauraro
 language by actually building its compiler and compiling test programs against it — not by
 reading documentation alone. Treat facts marked **verified** as tested; everything else is from
 docs/README and should be spot-checked before being relied on for anything load-bearing.
@@ -181,21 +201,41 @@ reasoning behind each is in the proposal doc's §5–§8.
 ## Repo layout (from the proposal's §7, already scaffolded as empty dirs)
 
 ```
-toolkit/ui/          UiNode AST, parser, tree-walking interpreter, style cache
+toolkit/ui/          UiNode AST, parser, tree-walking interpreter, style cache;
+                        ALSO every real widget (textinput/checkbox/radio/switch/
+                        slider/progress/dropdown/tabs/list) -- see below for why
+                        this, not toolkit/widgets/, is where they actually live
 toolkit/layout/       flexbox-subset layout engine
 toolkit/render/       Canvas trait + rasterizer primitives
 toolkit/render/hosted/  in-memory buffer backend (fast dev loop)
 toolkit/render/bare/    MMIO framebuffer backend (Cortex-M, UART-PPM)
-toolkit/render/uefi/    GOP linear-framebuffer backend (real display, primary target)
-toolkit/widgets/      Text, Panel, Button, List, Image
-toolkit/text/          baked bitmap font atlas + lookup (real glyph rendering, all 3 tiers)
+toolkit/render/uefi/    GOP linear-framebuffer backend (real display)
+toolkit/render/desktop/ SDL2 backend -- real window, live mouse+keyboard, the
+                        primary target for anything UI/visual, see below
+toolkit/widgets/      STALE -- an unused leftover from an abandoned raw-Win32
+                        windowing experiment two sessions ago (one file,
+                        cursor.tr, never wired into anything real). Every
+                        actual widget lives in toolkit/ui/ instead -- don't
+                        add new files here, it's not where anything looks.
+toolkit/text/          baked bitmap font atlas + lookup (real glyph rendering, all 4 tiers)
 toolkit/input/         event types + PS/2 driver (bare) + host binding (dev)
 toolkit/transport/     UART push protocol (bare) + file/socket watch (hosted)
 toolkit/platform/      boot glue, allocator, timer — thin, OS-specific
 examples/hosted_demo/  std tier, loads + hot-reloads a UI file
 examples/bare_demo/    --freestanding Cortex-M, qemu-system-arm + UART-PPM
 examples/uefi_demo/    --freestanding (no @entry) + hand-written zig UEFI stub,
-                        qemu-system-x86_64 + OVMF, real display window
+                        qemu-system-x86_64 + OVMF, real display window.
+                        render.tr = the minimal panel/text/button proof;
+                        render_widgets.tr = the FULL widget set on bare UEFI
+                        (see below); render_interactive.tr = the input shape
+examples/uefi_demo/render_widgets.tr
+                        every widget on a real firmware framebuffer, panel
+                        centered via the markup's own justify-center/
+                        items-center. Build with
+                        build-uefi-turnkey.ps1 -Source ... -OutDir build-uefi-widgets
+examples/desktop_demo/ real SDL2 window, live input, the original small demo
+examples/widgets_demo/ every widget (checkbox/radio/switch/slider/progress/
+                        dropdown/tabs/list) composed into one settings panel
 tools/fonts/           JetBrainsMono.ttf (SIL OFL 1.1) + its license -- font-baking source
 vendor/tauraroc/       the compiler binary + runtime/ headers it needs
 verified-examples/     small .tr files confirmed to compile+run in this session
@@ -217,16 +257,71 @@ so `toolkit/types.tr` exists to hold shared vocabulary and import nothing):
 ```
 toolkit/types.tr              Color packing, Rect, Event        (imports nothing)
 toolkit/ui/ast.tr             UiNode enum, boxing, depth guard
+toolkit/ui/palette.tr         GENERATED: Tailwind 22 hues x 11 shades (scripts/gen-palette.sh)
+toolkit/ui/scale.tr           Tailwind token suffix -> pixels (spacing/radius/border/fractions)
 toolkit/ui/style.tr           utility tokens, Style, StyleCache
 toolkit/ui/parser.tr          XML-like markup -> UiNode (see below)
 toolkit/render/canvas.tr      the Canvas interface (width/height/fill_rect/set_pixel)
 toolkit/render/hosted/buffer.tr  BufferCanvas + clipping + PPM
 toolkit/text/font_data.tr     GENERATED: baked bitmap glyph atlas (scripts/bake-font.ps1)
-toolkit/text/font.tr          Font: pixel_set(codepoint, col, row) lookup
+toolkit/text/font.tr          Font: pixel_coverage(codepoint, col, row) -> 0..16
 toolkit/layout/flex.tr        build/measure/place, row+col+gap+pad+grow (glyph size from font)
 toolkit/ui/interp.tr          tree walk, real glyph painting, hit-test, handler allowlist
 examples/hosted_demo/         main.tr + app.ui + app.reload.ui
 ```
+## Class vocabulary: real Tailwind scales (changed 2026-09-06)
+
+**A number in a class name is a Tailwind SCALE STEP, not a pixel count.** `p-4` is 16px
+(4 x 0.25rem at a 16px root), where it used to mean 4px. Every `.ui` file and embedded
+markup string in the repo was migrated in the same commit; the migration was verified by
+byte-diffing the hosted demo's PPM output before and after, which is what proves the
+translation is *consistent*. Correctness against the published scale is proven separately
+by `verified-examples/tailwind_tokens.tr` (81 assertions).
+
+Three modules, imported downward only:
+
+- **`toolkit/ui/palette.tr`** — GENERATED, do not edit. 22 hues x 11 shades = 242 colors.
+  Regenerate with `scripts/gen-palette.sh` from `scripts/tailwind-palette.txt`. It is
+  generated because hand-typing 242 hex literals is a transcription-error machine and one
+  wrong nibble renders as a plausible-but-wrong color no test would catch.
+- **`toolkit/ui/scale.tr`** — token suffix -> pixels. Spacing follows Tailwind **v4's
+  dynamic rule** (any integer step is `n * 4px`, so `p-13` is 52px) plus the four
+  half-steps and `px`; radius and border-width are their own separate scales.
+- **`toolkit/ui/style.tr`** — decides which `Style` field a prefix targets, and nothing
+  else. Split into five per-family helpers; **read its header before merging them back
+  together** (see the `__chkstk` note below).
+
+### Gotchas worth knowing before writing markup
+
+- **`border-4` is 4 PIXELS, `p-4` is 16px.** Border widths are literal pixels in Tailwind
+  while spacing is a scale. That asymmetry is Tailwind's, not ours.
+- **A bare hue means shade 500.** `bg-red` == `bg-red-500`. This CHANGED three legacy
+  names: `bg-slate` used to be `0x1E293B`, which is actually slate-**800**. Markup now
+  spells the shade (`bg-slate-800`). `steel`/`mist` survive as nebula extensions.
+- **Arbitrary values** are Tailwind's own escape hatch and are supported wherever a scale
+  value is: `w-[460px]`, `p-[17px]`, `bg-[#0B1120]`. The unit is optional. This is what the
+  old `w-460` became, and it is deliberately uglier to type than `w-4` because reaching for
+  an exact pixel count should be a decision.
+- **Fractions are exact, not percentages.** `w-1/3` is carried as numerator/denominator and
+  resolved against the parent's content box at layout time, so three of them fill a 300px
+  row exactly (100 each). As 33% each they would leave a 3px gap.
+- **Unknown tokens are ignored, exactly like typos** — silently, because UI content can
+  arrive from outside the build and must never halt the renderer. `text-lg`, `shadow-md`,
+  `opacity-50`, `z-10`, `absolute` all parse and do nothing. Each is absent because the
+  renderer has no such concept, and `style.tr`'s header says which engine feature each
+  would need first. Adding any of them is an engine change first and a token second.
+
+### What the layout engine gained to support this
+
+Per-side padding (`px-`/`py-`/`pt-`/`pr-`/`pb-`/`pl-`/`ps-`/`pe-`), margins including
+negative (`-mt-4`), per-axis gap (`gap-x-`/`gap-y-`), fractional sizing (`w-1/2`, `w-full`,
+`w-screen`), and `justify-around`/`justify-evenly`. A child's margins count toward its
+parent's intrinsic size; a *fractional* child contributes nothing to it, matching CSS,
+because its size is not known until the parent's is.
+
+`examples/hosted_demo/tailwind.ui` exercises all of it and is rendered by
+`verified-examples/tailwind_layout.tr`, which dumps geometry that was checked by hand.
+
 
 ## UI markup format: XML-like, not indentation-based (changed 2026-09-03)
 
@@ -445,6 +540,45 @@ part is what's new, not "no zig at all". `boot.zig`/`build-uefi.ps1` still work 
 remain the reference for anything beyond the two-export convention (e.g. reading input devices,
 multiple windows, custom heap sizing).
 
+
+### A third UEFI-only failure: `__chkstk` (2026-09-06)
+
+**A function with a stack frame larger than 4KB fails to LINK on `--target uefi-x64`,
+and only there.** Found while building the Tailwind token table: `apply_utility` started
+life as one long if/elif chain over ~40 token prefixes, each branch with its own `mut`
+local. It compiled and ran correctly hosted, on Cortex-M, and in the SDL2 window; the
+UEFI link then failed with
+
+```
+lld-link: undefined symbol: __chkstk
+  note: referenced by module_toolkit_ui_style.c  (apply_utility)
+```
+
+`__chkstk` is the **Microsoft x64 ABI's stack-probe helper**. Any compiler targeting that
+ABI emits a call to it for a frame bigger than one 4KB page, so the guard page is touched
+in order rather than skipped over. UEFI shares the Microsoft x64 ABI (it is PE/COFF, which
+is the whole reason `_WIN32` gets predefined — see above) but is freestanding, so nothing
+supplies the helper.
+
+Not strictly a Tauraro bug: the codegen is doing the correct thing for the ABI. It is a
+**gap in the `uefi-x64` target**, which should either provide a `__chkstk` (it is ~10
+instructions) or compile with `-mno-stack-arg-probe`. Until it does, the constraint is
+real and worth knowing, because:
+
+- it is invisible on every other tier, so it surfaces long after the code looks correct;
+- the error names a symbol that appears nowhere in your source;
+- the trigger is *total locals in one function*, not recursion or allocation, so it grows
+  silently as a function accumulates branches.
+
+Worked around in `toolkit/ui/style.tr` by splitting the chain into five per-family helpers
+(`apply_flex_token`, `apply_edge_token`, `apply_spacing_token`, `apply_size_token`,
+`apply_color_family_token`), which keeps every frame well under a page and reads better
+anyway. That file's header carries the same warning next to the code, so the split does not
+get "tidied" back into one function later.
+
+> **Note:** `tau_bugs.txt`, referenced throughout this file as the running defect log, is
+> **not present in the repo** — it appears never to have been committed. Findings like this
+> one are being recorded here instead until it reappears.
 ### Two new bugs found getting here (full detail in `tau_bugs.txt` #12)
 
 - zig's `x86_64-uefi` target legitimately predefines `_WIN32`/`_WIN64`/`_MSC_VER` (UEFI really
@@ -480,9 +614,11 @@ identical on all three tiers because it's just data.
   to a crisp 1-bit-per-pixel 8x14 cell. Covers ASCII 32–126 (95 glyphs), emits
   `toolkit/text/font_data.tr` — 1330 bytes as one `List[u8]` literal (confirmed compiling fine
   at this size; no issue at this scale).
-- **`toolkit/text/font.tr`** — the lookup: `Font.pixel_set(codepoint, col, row) -> bool`. An
-  out-of-range codepoint or pixel returns `false` unconditionally (renders as blank space, never
-  a crash) — text content is not trusted input.
+- **`toolkit/text/font.tr`** — the lookup: `Font.pixel_coverage(codepoint, col, row) -> int`,
+  0..16. An out-of-range codepoint or pixel returns 0 unconditionally (renders as blank space,
+  never a crash) — text content is not trusted input. **(Superseded 2026-09-05: this was
+  `pixel_set(...) -> bool` over a 1-bit atlas until the antialiasing pass below; the atlas is
+  now one coverage byte per pixel, 10640 bytes.)**
 - **`Canvas` interface gained a 4th method**, `set_pixel(x, y, color)` — a baked glyph is an
   irregular per-pixel pattern, `fill_rect` alone can't draw one. Deliberately NOT a
   `draw_glyph(codepoint, ...)` method: that would couple every backend to font lookup. All three
@@ -513,21 +649,234 @@ NOT and on UEFI NOT (both render amber/violet correctly), so this is specific to
 using only colors and a canvas width empirically confirmed to complete; the underlying mechanism
 is still unknown and would need disassembly of the generated code to chase further.
 
-## What's next, highest value first
+## Desktop tier (SDL2): a real live window, full modern widget set, anti-aliased (2026-09-05)
 
-1. **A real login-screen demo on UEFI** — the user's actual stated goal (they previously shipped
-   a Rust DXE driver doing exactly this). `examples/uefi_demo/` now has real rendered text; a
-   real screen wants text INPUT (a UEFI Simple Text Input / Simple Pointer protocol driving
-   `Event`s through the existing `EventHandler` dispatch — the plumbing already exists
-   end-to-end) and a text field widget.
+A collaborator added a fourth `Canvas` backend, `toolkit/render/desktop/sdl_canvas.tr`
+(`SdlCanvas`), wrapping real SDL2 windowing/input via `toolkit/render/desktop/sdl_bindings.tr`
+(1670 symbols, `tauraroc bindgen`-generated). This is the only tier with a real live window and
+continuous mouse/keyboard input rather than a single static frame — `examples/desktop_demo/`
+demonstrates it. **`SDL2.dll` is gitignored, not committed** — `scripts/build-desktop.ps1`
+expects a local MSYS2 install (`C:\msys64\mingw64\...`). On a machine without MSYS2 (this one,
+both sessions), the workaround: generate an MSVC-compatible `SDL2.lib` straight from a fetched
+official `SDL2.dll` (no MSYS2 needed) —
+```
+Invoke-WebRequest https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9-win32-x64.zip -OutFile sdl2.zip
+# extract SDL2.dll from it, then:
+dumpbin /exports SDL2.dll > exports.txt   # from a VS install's Hostx64\x64 bin
+# build a LIBRARY SDL2 / EXPORTS .def from the export names, then:
+lib /def:SDL2.def /out:SDL2.lib /machine:x64
+tauraroc examples\desktop_demo\main.tr -o app.exe --link SDL2.lib   # NOT -lSDL2 -- that
+                                                                     # fails with "searched
+                                                                     # paths: none", tauraroc's
+                                                                     # -l resolution doesn't
+                                                                     # search the CWD.
+```
+`SDL2.lib` (but not the fetched `SDL2.dll`, per the gitignore rule above) is committed at the
+repo root from this session so it doesn't need re-deriving.
 
-2. **Per-frame arena reset (proposal 5.6).** The bump allocator never frees on any freestanding
-   tier, so today's demos are strictly single-frame. Needed before any animation, redraw, or
-   input-driven live-reload loop on bare metal or UEFI.
+### Widget expansion (this session): checkbox, radio, switch, slider, progress, dropdown, tabs, scroll list
 
-3. **Diffing (Phase 5)** — re-render currently repaints everything.
-4. **Transport (Phase 8)** — hosted is a file read today; there is no watch loop and no UART path,
-   and now also no "read the next UI file from an EFI System Partition" path for UEFI.
+Before this session there was exactly one real interactive widget, `TextInput`
+(`toolkit/ui/textinput.tr`). Eight more now exist, all under `toolkit/ui/` (matching
+`textinput.tr`'s actual location — `toolkit/widgets/` in the repo layout table is a stale
+leftover from an abandoned raw-Win32 windowing experiment two sessions ago, not a pattern
+anything real follows): `checkbox.tr`, `radio.tr`, `switch.tr`, `slider.tr`, `progress.tr`,
+`dropdown.tr`, `tabs.tr`, `list.tr`. `examples/widgets_demo/` composes all eight into one
+settings-panel-shaped window (header card + shadow, a Tabs strip, Checkbox/Radio-group/Switch,
+a Slider driving a ProgressBar live, a Dropdown, a mouse-wheel-scrollable list, footer buttons)
+— verified building and running live, screenshotted, confirmed correctly rendered.
+
+**Two real architectural findings from building this, worth knowing before adding more:**
+
+1. **The parser was already fully tag-agnostic** — `UiNode.Element(tag, ...)` accepts any
+   identifier with zero grammar changes, and layout/paint (`toolkit/layout/flex.tr`,
+   `Interpreter.paint`) branch on `LayoutBox.kind` (text vs. element) and `Style` fields, never
+   on `tag` name. So **Card/Divider/Badge needed no new code at all** — they're just existing
+   `Style` tokens (`radius-`, `border-`, `bw-`, `bg-`) composed in markup or via direct
+   `paint_rounded_rect`/`draw_text` calls; only genuinely *stateful* widgets (checked?, dragging,
+   selected index, scroll offset) need a host-owned class, because `Interpreter.render()` rebuilds
+   the whole `LayoutBox` tree from a **static class string** every call — see `textinput.tr`'s own
+   header comment, which every new widget file points back to instead of re-deriving.
+
+2. **`render_to()` cannot paint into a sub-rect.** `toolkit.layout.flex.layout_tree` always sizes
+   the root of whatever tree it's given to fill the *entire* canvas (`c.width()`/`c.height()`) —
+   there is no viewport/sub-region parameter. A second `render_to()` call for "just the tab
+   content" repaints the WHOLE window, erasing whatever chrome was already drawn. Found by
+   actually running the demo: the header card and its shadow were invisible because the tab
+   content tree, rendered second, silently painted over them from `(0,0)` again. Fixed by
+   host-painting per-tab content directly (`paint_tab_content` in `examples/widgets_demo/main.tr`)
+   rather than swapping full-canvas `UiNode` trees — the same host-paints-the-dynamic-part pattern
+   `TextInput`/`examples/uefi_demo/render_interactive.tr` already use, just applied to
+   per-tab content instead of per-field text.
+
+### Anti-aliasing: real, portable, computed by hand (no alpha channel anywhere in Canvas)
+
+The very first widgets_demo screenshot showed visibly jagged circles (radio dots, switch knob,
+slider thumb) and rounded-rect corners — every existing shape primitive
+(`fill_circle`/`paint_corner`/`paint_rounded_rect`) is a hard in/out pixel test, no softening.
+`Canvas.set_pixel` takes one final solid color and nothing else — no alpha, no destination
+read-back — and the bare-metal/UEFI framebuffer backends are plain write-only memory that
+genuinely cannot blend even in principle. So `toolkit/ui/interp.tr` gained `fill_circle_aa` /
+`paint_rounded_rect_aa`: each boundary pixel is supersampled on a 4x4 subgrid (16 integer-math
+sample points per pixel, no floats), and the BLENDED COLOR ITSELF is computed in Tauraro — a
+straight per-channel mix of the shape's own color and a caller-supplied flat backdrop color,
+weighted by how many of the 16 subsamples land inside — before that one final color is ever
+handed to `set_pixel`. Fully portable (works through the same four-method `Canvas` interface
+every backend already has), at the cost of the caller having to know what flat color is already
+sitting behind the shape it's about to draw (every widget got a `page_bg` field, defaulted to
+this demo's `0x0B1120`, for exactly this).
+
+## Full-path antialiasing, text, borders, alignment, DPI (2026-09-05, second pass)
+
+The first AA pass above covered only the six host-owned widgets that draw circles or rounded
+corners. This pass finished the job, guided by **`RASTERIZER.md`** at the repo root — read that
+before touching any shape primitive; it is the spec this rasterizer is now written against, and
+§5 (supersampling instead of coverage buffers), §5c (borders), §5d (integer blending) and §12
+(how to add a shape) are the sections that matter most. Verified on **all four tiers**: hosted
+PPM, Cortex-M3 under qemu, UEFI/OVMF screenshot, and the live SDL2 window.
+
+**1. The font atlas is antialiased now, not 1-bit.** Hard-edged 8x14 letterforms were the single
+most visible "not smooth" thing on screen, more than any corner. `scripts/bake-font.ps1` now
+emits one **0-16 coverage byte per pixel** instead of a bit (10640 bytes, up from 1330), and
+`draw_text` blends each partial pixel against a caller-supplied backdrop with the same
+`mix_color` every shape uses. `Font.pixel_set` became `Font.pixel_coverage`.
+
+**2. `draw_text` is now the ONE glyph loop.** There were three copies of it (interp, textinput,
+and each new widget); changing the atlas format would have meant fixing the same blend math in
+three places. Its signature gained a `bg` parameter — every call site has to say what flat color
+the text is sitting on, which is the same requirement every AA function here already had.
+
+**3. `Interpreter.paint` threads an ambient background through the recursion.** Each box passes
+its own resolved `bg` down as its children's backdrop (and an unfilled panel passes through
+whatever it inherited, because a transparent panel really is transparent). `Interpreter.root_bg`
+(default `0x0B1120`) seeds it and **must match the canvas clear color** — `examples/bare_demo`
+sets it to black for exactly this reason. This is what the previous pass listed as future work.
+
+**4. Borders are a real ring now, not two overlapping fills** (`RASTERIZER.md` §5c). Drawing an
+outer rounded rect in the border color and an inset one in the fill color *ghosts*: the inner
+fill's AA ramp blends toward solid border over pixels that are themselves already a
+border/ambient mix, leaving a lighter halo tracing every corner. No choice of backdrop argument
+fixes it — the information isn't available to the second call. `paint_rounded_box_aa` (and its
+circular twin `fill_circle_ring_aa`, for radio dots and slider thumbs) resolve fill/ring/ambient
+**per subsample in one pass** via `mix3_color`, so there are no longer two ramps to disagree.
+`paint_rounded_rect_aa` and `fill_circle_aa` remain for the un-bordered case.
+
+**5. `mix_color` was missing its rounding correction.** `(a*c + b*(16-c)) / 16` truncates, which
+biases every blended pixel about half a level toward black — one pixel is nothing, a whole UI's
+worth of edges is a faint dark fringe around every corner and glyph. Now `+ 8` before the divide
+(`RASTERIZER.md` §5d).
+
+**6. Layout gained real `justify-*` / `items-*` alignment** (`toolkit/layout/flex.tr`,
+`toolkit/ui/style.tr`) — Tailwind's own spelling, so the vocabulary carries over. This stopped
+being optional the moment the toolkit had buttons: a `<button>` wrapping a `<text>` put its label
+hard against the top-left corner, which reads as broken next to any real UI, and padding can't
+fix it because the label's size varies with its content. `justify-center items-center` is the
+whole fix; every demo's buttons now carry it. `items-stretch` stays the default, so no existing
+`.ui` file changed behavior. `grow` and `justify` deliberately don't fight: a box with a growing
+child has no leftover main-axis space, so justify is a no-op there, same as real flexbox.
+
+**7. The SDL window is DPI-aware** (`SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")`,
+**before** `SDL_Init` — the hint is only read during video-subsystem startup). Without it Windows
+renders at the requested logical size and then bitmap-stretches the finished frame up to physical
+pixels, which bilinearly re-blurs every antialiased edge the rasterizer just computed at 16
+subsamples per pixel. This also resolves the earlier session's "GetWindowRect returns a bigger
+footprint than requested" note: that was real, it was this, and it's fixed. (Note for anyone
+measuring it again: a *measuring* process must call `SetProcessDPIAware()` too, or it gets
+virtualized coordinates back and the numbers won't line up with what's on screen.)
+
+## The full widget set on bare UEFI (2026-09-05) — `examples/uefi_demo/render_widgets.tr`
+
+`render.tr` proves the UEFI pipeline with three colored boxes and two buttons. This one proves
+the pipeline is good enough to build a real OS-level screen with: **every widget the desktop tier
+has — checkbox, radio group, switch, slider, progress bar, dropdown (rendered OPEN, with a hovered
+row), tab strip, scrolling list, plus card/divider/badge — on a firmware framebuffer with no OS,
+no libc, no filesystem and no window manager.** Screenshot-verified under qemu+OVMF at 1280x800.
+
+```
+.\scripts\build-uefi-turnkey.ps1 -Source examples\uefi_demo\render_widgets.tr -OutDir build-uefi-widgets
+.\scripts\run-uefi.ps1 -OutDir build-uefi-widgets -Build:$false          # add -NoWindow to auto-screenshot
+```
+
+**Nothing in `toolkit/` changed to make this work.** It is the same source
+`examples/widgets_demo/main.tr` runs in an SDL2 window, at the same pixel offsets, so the two
+tiers render an identical panel. Exactly three things differ, and all three are inherent to the
+tier rather than to the widgets:
+
+1. `SdlCanvas` -> `GopCanvas`. That is the entire porting cost.
+2. **No event loop.** No pointer/keyboard driver is wired up on this tier yet, so each widget is
+   constructed in a deliberately non-default state (checkbox checked, *second* radio selected via
+   `select_only`, switch on, slider at 65%, dropdown open on a hovered row, a list row selected)
+   rather than responding to input. Those are all plain `pub` fields — a Simple Pointer / Simple
+   Text Input driver would set them exactly the way the SDL loop does. `Switch` needs no `tick()`
+   here because `init()` already seeds `knob_pos` to the settled end of its travel.
+3. **No drop shadow.** `SdlCanvas.draw_shadow` uses SDL's alpha blend modes; a write-only GOP
+   framebuffer cannot blend. The antialiasing is unaffected — it never needed alpha, which is the
+   whole point of the §5 design, and is why it looks identical on all four tiers.
+
+**The panel is centered by the markup, not by arithmetic**, which is the first real use of the
+alignment tokens: an outer full-screen `<panel "flex-row justify-center items-center">` around a
+fixed `w-460 h-560` child. Before those tokens this was not expressible in markup at all. The
+host-painted widgets then read their origin back off the laid-out tree
+(`it.root.children[0].x/y`) rather than recomputing the centering — so if the panel's size or the
+centering rule changes, they follow instead of silently drifting.
+
+## What's next — the plan
+
+Full detail and rationale in `docs/proposal/proposal-v3-cross-platform-engine.md` §5. Ordered
+by value delivered per unit of risk, not by dependency convenience. Each phase is
+independently shippable and leaves the repo working.
+
+**Phase 1 — unblock the freestanding tiers.** The difference between a rendering demo and a
+GUI engine, and the highest-value work available.
+1. **Per-frame arena reset.** The bump allocator never frees, so UEFI/bare-metal/embedded are
+   strictly single-frame. A mark/release turns them into real interactive tiers. Blocks
+   animation, redraw, and everything data-driven on three of six platform families.
+2. **A UEFI input driver.** Simple Pointer + Simple Text Input → `Event`. Everything
+   downstream already exists and is proven on desktop: `EventHandler` dispatch, hit-testing,
+   every widget's `click_inside`/`handle_key`, `textinput.tr`. **This produces the login
+   screen.** `render_interactive.tr` is the pattern; `boot.zig` is the reference for reaching
+   protocols beyond GOP.
+
+**Phase 2 — the browser backend.** The biggest widening of reach, and it tests the
+portability claim against a platform maximally unlike the working ones. WASM `Canvas` into
+linear memory, JS blits via `ImageData`, DOM events into an exported entry point. *Verify the
+interop shape with a compiling probe first* — that is the main unknown.
+
+**Phase 3 — the `nebula` CLI.** `init` / `dev` / `run --<target>` / `build`. Generates each
+tier's entry point including the ~80-line bump allocator currently copy-pasted into four
+programs, and absorbs the four PowerShell scripts and their flag folklore. *Settle whether
+Tauraro can list directories and spawn processes before designing this* — it decides whether
+the CLI is a Tauraro binary or a Tauraro core plus a shell wrapper.
+
+**Phase 4 — app structure.** Folder-based screens resolved at BUILD time (no filesystem on
+freestanding tiers, so codegen emits markup as string constants), `layout.ui` composition,
+`goto:` navigation — which needs no grammar change, since the AST already stores handler names
+as opaque strings — and hot reload on `nebula dev`.
+
+**Phase 5 — mobile.** Android and iOS through the existing `SdlCanvas`; plausibly mostly build
+configuration, since SDL2 supports both and the bindings already exist.
+
+**Phase 6 — engine depth**, in demand order: multiple font sizes (currently the most visible
+authoring limit — `text-lg` parses and does nothing), gamma-correct blending
+(`RASTERIZER.md` §3), sub-rect rendering (removes the entire host-paint-the-dynamic-part
+workaround class), diffing, `templa` integration, then images/per-corner radii/shadows.
+
+### Open questions to settle with a compiling probe, not by reading docs
+
+1. Can Tauraro list directories and spawn processes? (blocks Phase 3's shape)
+2. What does WASM interop look like — exports to JS, imports from it? (blocks Phase 2)
+3. Does SDL2 actually cross-build for `android-arm64`/`ios`? (decides if Phase 5 is days or weeks)
+4. Is `--no-heap` viable for the smallest embedded targets? (the engine uses `List`/`Dict`
+   throughout, so probably not without a parallel data path)
+5. What is `templa`'s syntax and integration surface? (ask, before building the slot)
+
+### A standing rule for backends
+
+Backends stay tiny because `Canvas` is four methods. **If a backend starts growing
+engine-shaped code, that is the signal something belongs in the core instead.** And
+"pixel-identical across tiers" is this project's strongest claim — it only stays true if it is
+checked, so byte-diffing renders should be the standard check for every backend (it already
+caught one regression).
 
 ### Cortex-M/UART tier — kept working, no longer the priority
 

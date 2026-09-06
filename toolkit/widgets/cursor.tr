@@ -1,0 +1,72 @@
+# toolkit.widgets.cursor — a mouse pointer sprite, drawn on top of the UI.
+#
+# Deliberately a fixed hand-authored bitmap rather than a baked-from-TTF atlas
+# like toolkit/text/: a cursor is one small fixed glyph, not 95 of them, so a
+# whole bake pipeline would be overhead with no payoff. Same blit mechanism as
+# a text glyph, though -- one Canvas.set_pixel call per foreground bit -- so
+# it costs nothing new on any Canvas backend.
+#
+# Deliberately NOT part of toolkit.ui: a cursor is host/input state (where the
+# pointing device currently is), not UI content -- it never comes from a
+# parsed .ui tree, and always gets painted last so it stays on top of
+# whatever the interpreter just rendered.
+
+from toolkit.render.canvas import Canvas
+
+pub def cursor_w() -> int:
+    return 8
+
+pub def cursor_h() -> int:
+    return 12
+
+# One byte per row, MSB = leftmost pixel, 1 = filled. A small solid arrow,
+# tip at (0,0) -- matches where a real OS cursor's hotspot sits, so the tip
+# lands exactly on the reported pointer position rather than its bounding box.
+def row_bits(row: int) -> int:
+    if row == 0:
+        return 0x80
+    if row == 1:
+        return 0xC0
+    if row == 2:
+        return 0xE0
+    if row == 3:
+        return 0xF0
+    if row == 4:
+        return 0xF8
+    if row == 5:
+        return 0xFC
+    if row == 6:
+        return 0xFE
+    if row == 7:
+        return 0xFF
+    if row == 8:
+        return 0xF8
+    if row == 9:
+        return 0xD8
+    if row == 10:
+        return 0x8C
+    if row == 11:
+        return 0x06
+    return 0
+
+def pow2(n: int) -> int:
+    mut r = 1
+    mut i = 0
+    while i < n:
+        r = r * 2
+        i = i + 1
+    return r
+
+# Draws with the tip at (x, y). Bounds are left to Canvas.set_pixel's own
+# clipping -- a cursor sitting half off a window edge is normal, not an error.
+pub def draw_cursor(c: Canvas, x: int, y: int, color: int) -> void:
+    mut row = 0
+    while row < cursor_h():
+        mut bits = row_bits(row)
+        mut col = 0
+        while col < cursor_w():
+            mut bit = (bits / pow2(7 - col)) % 2
+            if bit == 1:
+                c.set_pixel(x + col, y + row, color)
+            col = col + 1
+        row = row + 1

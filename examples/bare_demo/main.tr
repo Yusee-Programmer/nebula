@@ -159,12 +159,15 @@ def kernel_main():
     # and certain canvas widths (96 hangs, 88 does not, same everything else)
     # hang deterministically on this exact target for reasons not yet
     # root-caused. Bisect any change to either before trusting it here.
-    mut src = "<panel \"flex-col p-2 gap-2 bg-slate\">\n  <panel \"flex-row gap-2 h-20\">\n    <panel \"bg-red grow\" />\n    <panel \"bg-green grow\" />\n    <panel \"bg-blue grow\" />\n  </panel>\n  <text \"text-white\">BARE METAL</text>\n  <panel \"flex-row gap-2 h-12\" @on_click(on_ok)>\n    <panel \"bg-blue grow\" />\n    <panel \"bg-red w-14\" />\n  </panel>\n</panel>\n"
+    mut src = "<panel \"flex-col p-0.5 gap-0.5 bg-slate-800\">\n  <panel \"flex-row gap-0.5 h-5\">\n    <panel \"bg-red grow\" />\n    <panel \"bg-green grow\" />\n    <panel \"bg-blue grow\" />\n  </panel>\n  <text \"text-white\">BARE METAL</text>\n  <panel \"flex-row gap-0.5 h-3\" @on_click(on_ok)>\n    <panel \"bg-blue grow\" />\n    <panel \"bg-red w-3.5\" />\n  </panel>\n</panel>\n"
 
     mut p = UiParser.init()
     mut tree = p.parse(src)
 
     mut it = Interpreter.init()
+    # Must match the FrameBuffer's clear color below: it's what the
+    # antialiased edges of the outermost panel blend against.
+    it.root_bg = 0x000000
     mut ok = OkHandler.init()
     register_handler(it, "on_ok", ok)
 

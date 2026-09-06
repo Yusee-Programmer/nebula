@@ -1,21 +1,29 @@
-# toolkit.text.font — lookup over the baked bitmap glyph atlas.
+# toolkit.text.font — lookup over the baked antialiased glyph atlas.
 #
 # The atlas itself (toolkit/text/font_data.tr) is generated, not written by
-# hand — see scripts/bake-font.ps1 for why a baked bitmap atlas exists at all
-# rather than parsing the TTF on-device (no rasterizer in Tauraro's stdlib,
-# no float/curve math verified on the freestanding tiers, no filesystem to
-# load a .ttf from on bare metal or UEFI anyway). This module is the only
-# thing between that raw byte data and toolkit.ui.interp's glyph painting.
+# hand — see scripts/bake-font.ps1 for why a baked atlas exists at all rather
+# than parsing the TTF on-device (no rasterizer in Tauraro's stdlib, no
+# float/curve math verified on the freestanding tiers, no filesystem to load
+# a .ttf from on bare metal or UEFI anyway). This module is the only thing
+# between that raw byte data and toolkit.ui.interp's glyph painting.
+#
+# Each stored pixel is a 0-16 COVERAGE LEVEL (2026-09-05: previously a single
+# on/off bit — hard-edged 8x14 letterforms were the most visible "not smooth"
+# thing anywhere in the toolkit, more than any rounded corner, so this
+# changed first), the same scale toolkit.ui.interp.mix_color() already
+# blends circles and rounded corners against. `pixel_coverage` is the text
+# equivalent of that same idea: callers blend it against their own known
+# backdrop color exactly the way fill_circle_aa/paint_rounded_rect_aa do.
 
-from toolkit.text.font_data import font_cell_w, font_cell_h, font_first_char, font_glyph_count, font_bitmap
+from toolkit.text.font_data import font_cell_w, font_cell_h, font_first_char, font_glyph_count, font_coverage
 
 pub class Font:
-    pub bitmap: List[u8]
+    pub coverage: List[u8]
 
 extend Font:
     pub def load() -> Font:
         mut f = Font()
-        f.bitmap = font_bitmap()
+        f.coverage = font_coverage()
         return f
 
     pub def cell_w(self) -> int:
@@ -24,27 +32,28 @@ extend Font:
     pub def cell_h(self) -> int:
         return font_cell_h()
 
-    # True if pixel (col, row) within the glyph cell for `codepoint` is
-    # foreground. A codepoint outside the baked range (currently ASCII
-    # 32..126) or an out-of-cell (col, row) returns false unconditionally --
-    # an unsupported character renders as blank space, never garbage or a
-    # crash. UI text content is not a trusted input.
-    pub def pixel_set(self, codepoint: int, col: int, row: int) -> bool:
+    # 0-16 coverage for pixel (col, row) within the glyph cell for
+    # `codepoint` -- 0 is fully background, 16 is fully foreground, anything
+    # between is a real antialiased edge. A codepoint outside the baked range
+    # (currently ASCII 32..126) or an out-of-cell (col, row) returns 0
+    # unconditionally, same policy the old boolean version had: an
+    # unsupported character renders as blank space, never garbage or a
+    # crash. UI text content is not trusted input.
+    pub def pixel_coverage(self, codepoint: int, col: int, row: int) -> int:
         mut idx = codepoint - font_first_char()
         if idx < 0:
-            return false
+            return 0
         if idx >= font_glyph_count():
-            return false
+            return 0
         if col < 0:
-            return false
+            return 0
         if col >= font_cell_w():
-            return false
+            return 0
         if row < 0:
-            return false
+            return 0
         if row >= font_cell_h():
-            return false
+            return 0
 
-        mut byte_index = idx * font_cell_h() + row
-        mut rowbyte = self.bitmap[byte_index]
-        mut mask: u8 = (0x80 as u8) >> (col as u8)
-        return (rowbyte & mask) != (0 as u8)
+        mut cell = font_cell_w() * font_cell_h()
+        mut byte_index = idx * cell + row * font_cell_w() + col
+        return self.coverage[byte_index] as int

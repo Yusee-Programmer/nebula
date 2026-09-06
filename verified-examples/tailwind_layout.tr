@@ -1,0 +1,26 @@
+# verified-examples/tailwind_layout.tr — renders examples/hosted_demo/tailwind.ui
+# and dumps the resulting geometry, so the new layout features (fractional
+# sizing, margins, justify-evenly/between, per-side padding) can be checked
+# against arithmetic done by hand rather than only by eye.
+#
+#   tauraroc --run verified-examples/tailwind_layout.tr
+
+from io.file import File
+from toolkit.ui.parser import UiParser
+from toolkit.ui.interp import Interpreter, render_to
+from toolkit.render.hosted.buffer import BufferCanvas
+from toolkit.layout.flex import dump_layout
+
+def main():
+    mut src = File.read_text("examples/hosted_demo/tailwind.ui")
+    mut p = UiParser.init()
+    mut tree = p.parse(src)
+    p.report()
+
+    mut it = Interpreter.init()
+    it.root_bg = 0x0F172A
+    mut canvas = BufferCanvas.init(320, 336, 0x0F172A)
+    render_to(it, tree, canvas)
+    dump_layout(it.root, 0)
+    canvas.save_ppm("examples/hosted_demo/out_tailwind.ppm")
+    print("wrote examples/hosted_demo/out_tailwind.ppm")

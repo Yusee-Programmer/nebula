@@ -1,40 +1,125 @@
-# Tauraro UI Toolkit
+# Nebula
 
-A declarative, Tailwind-style UI toolkit for the [Tauraro](https://github.com/tauraro/tauraro)
-language, aimed at people building their own operating systems in Tauraro — bring your own
-kernel, get a UI layer almost for free.
+**A cross-platform GUI engine with its own declarative UI syntax, written in
+[Tauraro](https://github.com/tauraro/tauraro).**
 
-**Start here:** `CLAUDE.md` (project context, verified language facts, gotchas) and
-`docs/proposal/proposal-v2-runtime-interpreter.md` (the actual architecture and phased plan).
+Write once, run anywhere: **browser, desktop, mobile, embedded, bare metal, UEFI** — up to
+and including an operating system's own interface.
 
-## What's in this scaffold
-
-- `docs/proposal/` — the design proposal this project is built from.
-- `docs/tauraro-lang-reference/` — a copy of the upstream Tauraro language/stdlib/dev docs, for
-  offline reference.
-- `vendor/tauraroc/` — a working `tauraroc` binary (Linux x64, built from upstream's own
-  bootstrap tree) plus the `runtime/` headers it needs. Verify against a current release before
-  relying on it for real work — see `CLAUDE.md`.
-- `verified-examples/` — small `.tr` programs actually compiled and run against the vendored
-  compiler in the session this scaffold was generated from. Not toy filler — these are the
-  confirmed-working shape of the patterns the toolkit design depends on (a boxed recursive enum
-  walked with `match`, a `Dict`-backed cache class).
-- `toolkit/`, `examples/` — empty scaffold matching the proposal's suggested repo layout.
-
-## Running the demo
-
-The installed Windows SDK (`tauraroc v0.0.8`) is on PATH. **Run from the repository root** so
-that `toolkit.*` module paths resolve:
-
-```sh
-tauraroc --run examples/hosted_demo/main.tr
+```
+<panel "flex-col p-6 gap-4 bg-slate-900">
+  <text "text-slate-100">NEBULA</text>
+  <panel "flex-row gap-4 grow">
+    <panel "w-1/2 bg-indigo-500 rounded-xl" />
+    <panel "grow bg-emerald-500 rounded-xl" />
+  </panel>
+  <button "grow bg-sky-500 rounded-lg justify-center items-center" @on_click(on_save)>
+    <text "text-white">SAVE</text>
+  </button>
+</panel>
 ```
 
-This loads `examples/hosted_demo/app.ui`, parses it into a `UiNode` tree, resolves its class
-strings through the cached style table, lays it out, paints it to a `Canvas`, and writes
-`out_1.ppm` — then renders `app.reload.ui` through the *same live interpreter* to `out_2.ppm`,
-with no rebuild and no restart. It also dispatches synthetic clicks to show the handler
-allowlist accepting hits on buttons and rejecting everything else.
+That file renders identically in an SDL2 window, into a UEFI firmware framebuffer with no OS,
+and on a Cortex-M3 with no libc and no filesystem.
 
-The `vendor/tauraroc/` binary is a Linux ELF and does **not** run on Windows; it is kept for
-provenance only. See `CLAUDE.md`.
+## Why it ports so widely
+
+Most GUI frameworks are portable *downward* from a desktop OS — they assume threads, a
+compositor, a font service, an allocator and a graphics API, then work to shed them. Nebula
+was built the other way, from nothing upward. The entire contract between the engine and the
+machine is four methods:
+
+```
+width() -> int          height() -> int
+fill_rect(x, y, w, h, color)
+set_pixel(x, y, color)
+```
+
+No alpha. No destination read-back. No state. No graphics API. A write-only memory-mapped
+framebuffer satisfies it completely — which is why antialiasing had to be solved by computing
+the blended color *before* the pixel write (4×4 integer supersampling against a known
+backdrop), and why the result looks identical on every backend.
+
+**Adding a platform costs one `Canvas` implementation and one input source.** Everything above
+the pixel — markup parser, Tailwind-style resolution, flexbox layout, tree-walking
+interpreter, rasterizer, baked font, hit-testing, event dispatch, and all nine widgets — never
+learns which platform it is on.
+
+## Status
+
+| Backend | Canvas | Input | State |
+|---|---|---|---|
+| Hosted (PPM) | `BufferCanvas` | synthetic | ✅ the dev loop |
+| Desktop (SDL2) | `SdlCanvas` | mouse, keyboard, wheel | ✅ live window, DPI-aware |
+| UEFI (GOP) | `GopCanvas` | — | ✅ renders; input driver is next |
+| Bare metal (MMIO) | `FrameBuffer` | — | ✅ Cortex-M3 under qemu |
+| Browser (WASM) | — | — | planned |
+| Mobile (Android/iOS) | — | — | planned |
+
+The desktop and UEFI tiers render the full nine-widget panel **pixel-identically**; the only
+difference in the source is which `Canvas` is constructed.
+
+Reaching browser and mobile is *backend* work, not compiler work — `tauraroc --target`
+already cross-compiles to `wasm`, `wasm-wasi`, `android-*`, `ios`, `macos-*`, `linux-*`,
+`windows-*`, `embedded-*` and `uefi-x64`.
+
+## Quick start
+
+Run everything from the repository root, so `toolkit.*` module paths resolve.
+
+```sh
+# hosted — fastest loop, writes a PPM
+tauraroc --run examples/quickstart/main.tr
+
+# desktop — a real window with live input
+tauraroc examples/quickstart/desktop.tr -o build/quickstart.exe --link SDL2.lib
+build/quickstart.exe
+
+# UEFI — a real firmware framebuffer under QEMU
+./scripts/build-uefi-turnkey.ps1 -Source examples/uefi_demo/render_widgets.tr -OutDir build-uefi-widgets
+./scripts/run-uefi.ps1 -OutDir build-uefi-widgets -Build:$false
+```
+
+`examples/quickstart/` is the smallest complete program — the same `app.ui` rendered hosted
+and in a window, so the diff between tiers is one line.
+
+## The UI syntax
+
+Angle-bracket markup, with a **bare quoted class string** — no `class="..."` — and
+`@event(handler)` binding a handler *name*, so markup never references code directly.
+
+Class strings are **real Tailwind**: numbers are scale steps, so `p-4` is 16px. The full
+22-hue × 11-shade palette, arbitrary values (`w-[460px]`), and exact fractions (`w-1/3` fills
+a row with no rounding gap). Tags are arbitrary — `<button>` is a `<panel>` by convention, and
+only `<text>` is special.
+
+Templating is **`templa`** (this project's own engine), integrated later.
+
+## Repo layout
+
+```
+toolkit/ui/          markup AST, parser, interpreter, style, palette, scale, widgets
+toolkit/layout/      flexbox subset
+toolkit/render/      Canvas interface + one directory per backend
+toolkit/text/        baked antialiased glyph atlas + lookup
+examples/quickstart/ the smallest complete program — start here
+examples/            one demo per tier, plus the nine-widget showcase
+docs/proposal/       the spec (v3 is current)
+verified-examples/   .tr programs confirmed to compile and run, incl. token tests
+scripts/             per-tier build/run, font baking, palette generation
+RASTERIZER.md        the rasterizer spec — read before touching a shape primitive
+CLAUDE.md            project memory: verified language facts, gotchas, plan
+```
+
+## Documentation
+
+- **`docs/proposal/proposal-v3-cross-platform-engine.md`** — the current spec: what Nebula is,
+  where it stands, and the phased plan. Start here.
+- **`CLAUDE.md`** — project memory. Verified Tauraro language facts (several of which
+  contradict the upstream docs), per-tier build folklore, and hard-won gotchas.
+- **`RASTERIZER.md`** — how antialiasing works without an alpha channel, and how to add a
+  shape primitive without breaking the portability guarantee.
+
+## License
+
+See `tools/fonts/` for the bundled JetBrains Mono license (SIL OFL 1.1).

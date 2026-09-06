@@ -1,11 +1,44 @@
-# toolkit.ui.style — utility-token table and the resolution cache.
+# toolkit.ui.style — the Tailwind utility vocabulary, and the resolution cache.
 #
 # The whole point of resolving styles at runtime rather than at compile time is
 # that a class string no longer has to be a literal the compiler can see. The
 # cost of that freedom is a parse per string, and the cache is what makes the
 # cost land once per unique string instead of once per node per frame.
+#
+# ## The scale changed on 2026-09-06 -- read this before editing any .ui file
+#
+# Class numbers are now Tailwind SCALE STEPS, not pixel counts. `p-4` is 16px
+# (4 steps x 4px), where it used to mean 4px. Every number in every existing
+# .ui file was migrated in the same commit that made this change. The
+# arithmetic all lives in toolkit.ui.scale; this module only decides which
+# Style field a given prefix targets.
+#
+# For a literal pixel count, use Tailwind's own arbitrary-value syntax:
+# `w-[460px]`. That is what the old `w-460` became.
+#
+# ## What is deliberately NOT implemented
+#
+# Tokens whose CSS property this renderer has no concept of are ignored, the
+# same way a typo is -- silently, because UI content can arrive from outside
+# the build and must never be able to halt the renderer. Notably:
+#
+#   text-{xs,sm,lg,...}  font sizes. The toolkit has exactly one baked bitmap
+#                        font at 8x14 (toolkit/text/); a second size means a
+#                        second atlas, not a style token.
+#   shadow-*, opacity-*  need an alpha channel Canvas does not have (see
+#                        RASTERIZER.md 0 for why that is a deliberate
+#                        constraint, not an oversight).
+#   rounded-t-*, etc.    per-corner radii. The rasterizer takes one radius per
+#                        box (paint_rounded_box_aa).
+#   flex-*-reverse       the layout engine places children in list order only.
+#   absolute/fixed/z-*   there is no positioning model beyond flex flow.
+#
+# Adding any of those is an engine change first and a token second.
 
 from toolkit.types import rgb
+from toolkit.ui.palette import color_shade, no_color
+from toolkit.ui.scale import no_px, spacing_px, radius_px, border_px
+from toolkit.ui.scale import fraction_num, fraction_den, strip_brackets, arbitrary_px
 from string.str import Str
 
 pub def dir_row() -> int:
@@ -14,139 +47,138 @@ pub def dir_row() -> int:
 pub def dir_col() -> int:
     return 1
 
+# Alignment values, shared by both axes -- `justify` positions children along
+# the main axis, `align` along the cross axis, exactly as CSS flexbox does.
+# `align_stretch` is cross-axis only (a child with no explicit cross size
+# fills the parent's content box) and is the default, which is why it is
+# listed first: it preserves the behavior every existing .ui file was written
+# against, so adding these tokens changed nothing that didn't ask for it.
+pub def align_stretch() -> int:
+    return 0
+
+pub def align_start() -> int:
+    return 1
+
+pub def align_center() -> int:
+    return 2
+
+pub def align_end() -> int:
+    return 3
+
+pub def align_between() -> int:
+    return 4
+
+pub def align_around() -> int:
+    return 5
+
+pub def align_evenly() -> int:
+    return 6
+
 pub def unset() -> int:
     # Sentinel for "this property was never set by any token". Distinguishable
     # from a legitimate 0 (a zero-width box) and from black (0x000000).
+    # MUST equal toolkit.ui.palette.no_color(); that module cannot import this
+    # one (Tauraro rejects circular imports) so it re-declares the value.
     return 0 - 1
 
 pub class Style:
     pub dir:      int
-    pub pad:      int
-    pub gap:      int
+    # Padding is per-side. `p-4` sets all four; `px-4`/`pt-4` set subsets.
+    pub pad_t:    int
+    pub pad_r:    int
+    pub pad_b:    int
+    pub pad_l:    int
+    # Margins, same shape. Negative values are legal (`-mt-4`), which is why
+    # nothing here clamps at zero.
+    pub mar_t:    int
+    pub mar_r:    int
+    pub mar_b:    int
+    pub mar_l:    int
+    # Gap is per-axis (`gap-x-4` / `gap-y-4`); `gap-4` sets both. Only the one
+    # matching the box's own direction is ever read, but both are carried so a
+    # single class string can serve rows and columns.
+    pub gap_x:    int
+    pub gap_y:    int
     pub w:        int
     pub h:        int
+    # Fractional sizing (`w-1/2`, `w-full`), kept as numerator/denominator and
+    # resolved against the parent's content box at layout time. Denominator 0
+    # means "not set" -- see toolkit.ui.scale for why this is a fraction and
+    # not a percentage.
+    pub w_num:    int
+    pub w_den:    int
+    pub h_num:    int
+    pub h_den:    int
     pub grow:     int
     pub bg:       int
     pub fg:       int
     pub border:   int   # unset() = no border, matching bg's sentinel convention
     pub border_w: int   # px; a set border color with border_w==0 paints nothing
-    pub radius:   int   # px corner radius, 0 = square corners (the pre-existing look)
+    pub radius:   int   # px corner radius, 0 = square corners
+    pub justify:  int   # main-axis distribution  (justify-*)
+    pub align:    int   # cross-axis alignment    (items-*)
 
 extend Style:
     pub def default() -> Style:
         mut s = Style()
         s.dir      = dir_row()
-        s.pad      = 0
-        s.gap      = 0
+        s.pad_t    = 0
+        s.pad_r    = 0
+        s.pad_b    = 0
+        s.pad_l    = 0
+        s.mar_t    = 0
+        s.mar_r    = 0
+        s.mar_b    = 0
+        s.mar_l    = 0
+        s.gap_x    = 0
+        s.gap_y    = 0
         s.w        = unset()
         s.h        = unset()
+        s.w_num    = 0
+        s.w_den    = 0
+        s.h_num    = 0
+        s.h_den    = 0
         s.grow     = 0
         s.bg       = unset()
         s.fg       = 0xE6E6E6
         s.border   = unset()
         s.border_w = 0
         s.radius   = 0
+        s.justify  = align_start()
+        s.align    = align_stretch()
         return s
 
     pub def copy(self) -> Style:
         mut s = Style()
         s.dir      = self.dir
-        s.pad      = self.pad
-        s.gap      = self.gap
+        s.pad_t    = self.pad_t
+        s.pad_r    = self.pad_r
+        s.pad_b    = self.pad_b
+        s.pad_l    = self.pad_l
+        s.mar_t    = self.mar_t
+        s.mar_r    = self.mar_r
+        s.mar_b    = self.mar_b
+        s.mar_l    = self.mar_l
+        s.gap_x    = self.gap_x
+        s.gap_y    = self.gap_y
         s.w        = self.w
         s.h        = self.h
+        s.w_num    = self.w_num
+        s.w_den    = self.w_den
+        s.h_num    = self.h_num
+        s.h_den    = self.h_den
         s.grow     = self.grow
         s.bg       = self.bg
         s.fg       = self.fg
         s.border   = self.border
         s.border_w = self.border_w
         s.radius   = self.radius
+        s.justify  = self.justify
+        s.align    = self.align
         return s
 
     pub def to_str(self) -> str:
-        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad.to_str() + " gap=" + self.gap.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " border_w=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + ")"
-
-# A named palette -- Tailwind's 500-shade values (the same source the
-# original 10 came from), extended 2026-09-04 to cover the rest of Tailwind's
-# hue wheel plus a few common aliases (navy/maroon/gold/silver/charcoal/
-# crimson/turquoise) UI authors reach for by habit. Unknown names resolve to
-# the sentinel so a typo shows up as "nothing was painted" rather than a
-# wrong-but-plausible color -- `bg-#RRGGBB` (parse_hex_color, below) is the
-# escape hatch for anything not in here.
-pub def color_by_name(name: str) -> int:
-    if name == "black":
-        return 0x000000
-    if name == "white":
-        return 0xFFFFFF
-    if name == "slate":
-        return 0x1E293B
-    if name == "steel":
-        return 0x334155
-    if name == "mist":
-        return 0x94A3B8
-    if name == "red":
-        return 0xEF4444
-    if name == "green":
-        return 0x22C55E
-    if name == "blue":
-        return 0x3B82F6
-    if name == "amber":
-        return 0xF59E0B
-    if name == "violet":
-        return 0x8B5CF6
-    if name == "orange":
-        return 0xF97316
-    if name == "yellow":
-        return 0xEAB308
-    if name == "lime":
-        return 0x84CC16
-    if name == "emerald":
-        return 0x10B981
-    if name == "teal":
-        return 0x14B8A6
-    if name == "cyan":
-        return 0x06B6D4
-    if name == "sky":
-        return 0x0EA5E9
-    if name == "indigo":
-        return 0x6366F1
-    if name == "purple":
-        return 0xA855F7
-    if name == "fuchsia":
-        return 0xD946EF
-    if name == "pink":
-        return 0xEC4899
-    if name == "rose":
-        return 0xF43F5E
-    if name == "gray":
-        return 0x6B7280
-    if name == "grey":
-        return 0x6B7280
-    if name == "zinc":
-        return 0x71717A
-    if name == "stone":
-        return 0x78716C
-    if name == "navy":
-        return 0x1E3A8A
-    if name == "maroon":
-        return 0x7F1D1D
-    if name == "brown":
-        return 0x78350F
-    if name == "gold":
-        return 0xCA8A04
-    if name == "silver":
-        return 0xD1D5DB
-    if name == "charcoal":
-        return 0x27272A
-    if name == "crimson":
-        return 0xDC2626
-    if name == "turquoise":
-        return 0x06B6D4
-    if name == "magenta":
-        return 0xD946EF
-    if name == "olive":
-        return 0x65A30D
-    return unset()
+        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + ")"
 
 def hex_digit_val(c: str) -> int:
     if c == "0": return 0
@@ -173,9 +205,8 @@ def hex_digit_val(c: str) -> int:
     if c == "F": return 15
     return 0 - 1
 
-# Arbitrary colors beyond the named palette: exactly 6 hex digits (RRGGBB,
-# no leading '#' -- the token itself carries that, see "bg-#" etc. in
-# apply_utility). Same typo policy as color_by_name: anything malformed
+# Arbitrary colors: exactly 6 hex digits (RRGGBB, no leading '#' -- the caller
+# strips that). Same typo policy as everything else here: anything malformed
 # resolves to the sentinel rather than a wrong color or a fatal error.
 pub def parse_hex_color(s: str) -> int:
     if Str.len(s) != 6:
@@ -190,90 +221,444 @@ pub def parse_hex_color(s: str) -> int:
         i = i + 1
     return v
 
-# Resolves the part of a color token after its prefix (e.g. "bg-#3B82F6" ->
-# "#3B82F6", "bg-red" -> "red") to a packed color, trying the named palette
-# first and a leading-'#' hex literal second -- one place both `bg-`/`text-`/
-# `border-` share, so a UI author writes `bg-#RRGGBB` exactly like `bg-red`
-# and gets the same "typo -> nothing painted" safety either way.
-def resolve_color_token(name: str) -> int:
-    mut c = color_by_name(name)
-    if c != unset():
-        return c
-    if Str.starts_with(name, "#"):
-        return parse_hex_color(Str.slice(name, 1, Str.len(name)))
+# Names that are NOT in the Tailwind palette but that UI authors reach for by
+# habit, kept as a nebula extension. "steel" and "mist" predate the Tailwind
+# port and are retained so class strings written before 2026-09-06 still
+# resolve; everything else here is a convenience alias with no Tailwind
+# equivalent. Prefer the real scale (bg-slate-700) in new markup -- these have
+# no shades and cannot be tuned.
+pub def extension_color(name: str) -> int:
+    if name == "steel":
+        return 0x334155
+    if name == "mist":
+        return 0x94A3B8
+    if name == "grey":
+        return 0x6B7280
+    if name == "navy":
+        return 0x1E3A8A
+    if name == "maroon":
+        return 0x7F1D1D
+    if name == "brown":
+        return 0x78350F
+    if name == "gold":
+        return 0xCA8A04
+    if name == "silver":
+        return 0xD1D5DB
+    if name == "charcoal":
+        return 0x27272A
+    if name == "crimson":
+        return 0xDC2626
+    if name == "turquoise":
+        return 0x06B6D4
+    if name == "magenta":
+        return 0xD946EF
+    if name == "olive":
+        return 0x65A30D
     return unset()
+
+# Resolves the part of a color token after its prefix -- "blue-500",
+# "[#1e293b]", "#1e293b", "white", "slate" -- to a packed color. One place
+# that bg-/text-/border- all share.
+#
+# A bare hue with no shade means shade 500, which is the conceptual default
+# even though real Tailwind requires the number. Note this CHANGED the meaning
+# of three legacy names on 2026-09-06: bg-slate used to be 0x1E293B (which is
+# slate-800) and is now slate-500. Every .ui file and markup string in the
+# repo was migrated to spell the shade explicitly in the same commit.
+pub def resolve_color_token(name: str) -> int:
+    mut raw = name
+    mut inner = strip_brackets(name)
+    if inner != "":
+        raw = inner
+
+    if Str.starts_with(raw, "#"):
+        return parse_hex_color(Str.slice(raw, 1, Str.len(raw)))
+
+    if raw == "white":
+        return 0xFFFFFF
+    if raw == "black":
+        return 0x000000
+    # No alpha channel anywhere in Canvas, so "transparent" can only mean
+    # "paint nothing", which is exactly what the unset sentinel already means.
+    if raw == "transparent":
+        return unset()
+
+    mut dash = Str.index_of(raw, "-")
+    if dash > 0:
+        mut hue = Str.slice(raw, 0, dash)
+        mut sh = Str.slice(raw, dash + 1, Str.len(raw))
+        if Str.is_digit(sh):
+            mut c = color_shade(hue, Str.parse_int(sh))
+            if c != no_color():
+                return c
+        return unset()
+
+    mut bare = color_shade(raw, 500)
+    if bare != no_color():
+        return bare
+    return extension_color(raw)
+
+# True when token begins with prefix; after() returns what follows it. Two
+# one-line helpers rather than inlining Str.slice arithmetic thirty times
+# below, where an off-by-one would be invisible.
+def has(token: str, prefix: str) -> bool:
+    return Str.starts_with(token, prefix)
+
+def after(token: str, prefix: str) -> str:
+    return Str.slice(token, Str.len(prefix), Str.len(token))
+
+def set_pad_all(s: Style, v: int) -> void:
+    s.pad_t = v
+    s.pad_r = v
+    s.pad_b = v
+    s.pad_l = v
+
+def set_mar_all(s: Style, v: int) -> void:
+    s.mar_t = v
+    s.mar_r = v
+    s.mar_b = v
+    s.mar_l = v
+
+# Fractional sizing, shared by w-* and h-*. Returns true if the suffix was a
+# fraction (1/2, full) and wrote num/den; the caller then knows not to also
+# try the absolute scale.
+def apply_fraction_w(s: Style, v: str) -> bool:
+    mut n = fraction_num(v)
+    if n < 0:
+        return false
+    s.w_num = n
+    s.w_den = fraction_den(v)
+    s.w = unset()
+    return true
+
+def apply_fraction_h(s: Style, v: str) -> bool:
+    mut n = fraction_num(v)
+    if n < 0:
+        return false
+    s.h_num = n
+    s.h_den = fraction_den(v)
+    s.h = unset()
+    return true
+
+
+# ## Why this is five functions and not one
+#
+# apply_utility was originally a single long if/elif chain. It compiled and
+# ran fine on every hosted tier, and failed to LINK on UEFI:
+#
+#   lld-link: undefined symbol: __chkstk   (referenced by apply_utility)
+#
+# __chkstk is the Microsoft x64 ABI's stack-probe helper. A compiler emits a
+# call to it for any function whose stack frame exceeds one 4KB page, so that
+# the guard page is touched in order; UEFI shares the Microsoft x64 ABI (it is
+# PE/COFF) but is freestanding, so nothing provides the helper. Every `mut`
+# in every branch of that chain got its own frame slot, and forty-odd of them
+# crossed the page.
+#
+# Splitting the chain by token family keeps each frame well under a page, and
+# is the shape the code wanted anyway. Each helper returns whether it consumed
+# the token, so apply_utility reads as a dispatch list.
+#
+# Keep this in mind before merging these back together or adding a sixth
+# family inline: the failure is a link error on one tier only, long after the
+# code looks correct everywhere else.
+
+# Direction, flex, alignment. No spacing values, so no scale lookups.
+def apply_flex_token(s: Style, token: str) -> bool:
+    if token == "flex-row":
+        s.dir = dir_row()
+        return true
+    if token == "flex-col":
+        s.dir = dir_col()
+        return true
+    if token == "grow":
+        s.grow = 1
+        return true
+    if token == "grow-0":
+        s.grow = 0
+        return true
+    # flex-1 in CSS is grow + shrink + basis-0. There is no shrink here, so it
+    # collapses to grow -- the visible result matches for the common case of
+    # children that already fit.
+    if token == "flex-1":
+        s.grow = 1
+        return true
+
+    if token == "justify-start":
+        s.justify = align_start()
+        return true
+    if token == "justify-center":
+        s.justify = align_center()
+        return true
+    if token == "justify-end":
+        s.justify = align_end()
+        return true
+    if token == "justify-between":
+        s.justify = align_between()
+        return true
+    if token == "justify-around":
+        s.justify = align_around()
+        return true
+    if token == "justify-evenly":
+        s.justify = align_evenly()
+        return true
+
+    if token == "items-stretch":
+        s.align = align_stretch()
+        return true
+    if token == "items-start":
+        s.align = align_start()
+        return true
+    if token == "items-center":
+        s.align = align_center()
+        return true
+    if token == "items-end":
+        s.align = align_end()
+        return true
+    # No per-box baseline metric is tracked (every glyph cell is the same
+    # height), so baseline and start are the same picture here.
+    if token == "items-baseline":
+        s.align = align_start()
+        return true
+    return false
+
+# Radius and border. Border width is tried before border color: the width
+# suffixes are a closed set of four numbers plus a bracketed literal, none of
+# which can collide with a hue name, so the order is unambiguous.
+def apply_edge_token(s: Style, token: str) -> bool:
+    if token == "rounded":
+        s.radius = radius_px("")
+        return true
+    if has(token, "rounded-"):
+        mut rv = radius_px(after(token, "rounded-"))
+        if rv != no_px():
+            s.radius = rv
+        return true
+    if token == "border":
+        s.border_w = border_px("")
+        return true
+    if has(token, "border-"):
+        mut bv = after(token, "border-")
+        mut bw = border_px(bv)
+        if bw != no_px():
+            s.border_w = bw
+            return true
+        mut bc = resolve_color_token(bv)
+        if bc != unset():
+            s.border = bc
+        return true
+    return false
+
+# Padding, margin and gap -- everything that reads the spacing scale. One
+# local `v` reused by every branch, deliberately: see the __chkstk note above.
+def apply_spacing_token(s: Style, token: str) -> bool:
+    mut v = no_px()
+
+    if has(token, "px-"):
+        v = spacing_px(after(token, "px-"))
+        if v != no_px():
+            s.pad_l = v
+            s.pad_r = v
+        return true
+    if has(token, "py-"):
+        v = spacing_px(after(token, "py-"))
+        if v != no_px():
+            s.pad_t = v
+            s.pad_b = v
+        return true
+    if has(token, "pt-"):
+        v = spacing_px(after(token, "pt-"))
+        if v != no_px():
+            s.pad_t = v
+        return true
+    if has(token, "pr-"):
+        v = spacing_px(after(token, "pr-"))
+        if v != no_px():
+            s.pad_r = v
+        return true
+    if has(token, "pb-"):
+        v = spacing_px(after(token, "pb-"))
+        if v != no_px():
+            s.pad_b = v
+        return true
+    if has(token, "pl-"):
+        v = spacing_px(after(token, "pl-"))
+        if v != no_px():
+            s.pad_l = v
+        return true
+    # ps-/pe- are the CSS logical (start/end) properties. This renderer is
+    # left-to-right only, so they are plain aliases for pl-/pr-.
+    if has(token, "ps-"):
+        v = spacing_px(after(token, "ps-"))
+        if v != no_px():
+            s.pad_l = v
+        return true
+    if has(token, "pe-"):
+        v = spacing_px(after(token, "pe-"))
+        if v != no_px():
+            s.pad_r = v
+        return true
+    if has(token, "p-"):
+        v = spacing_px(after(token, "p-"))
+        if v != no_px():
+            set_pad_all(s, v)
+        return true
+
+    if has(token, "mx-"):
+        v = spacing_px(after(token, "mx-"))
+        if v != no_px():
+            s.mar_l = v
+            s.mar_r = v
+        return true
+    if has(token, "my-"):
+        v = spacing_px(after(token, "my-"))
+        if v != no_px():
+            s.mar_t = v
+            s.mar_b = v
+        return true
+    if has(token, "mt-"):
+        v = spacing_px(after(token, "mt-"))
+        if v != no_px():
+            s.mar_t = v
+        return true
+    if has(token, "mr-"):
+        v = spacing_px(after(token, "mr-"))
+        if v != no_px():
+            s.mar_r = v
+        return true
+    if has(token, "mb-"):
+        v = spacing_px(after(token, "mb-"))
+        if v != no_px():
+            s.mar_b = v
+        return true
+    if has(token, "ml-"):
+        v = spacing_px(after(token, "ml-"))
+        if v != no_px():
+            s.mar_l = v
+        return true
+    if has(token, "m-"):
+        v = spacing_px(after(token, "m-"))
+        if v != no_px():
+            set_mar_all(s, v)
+        return true
+
+    if has(token, "gap-x-"):
+        v = spacing_px(after(token, "gap-x-"))
+        if v != no_px():
+            s.gap_x = v
+        return true
+    if has(token, "gap-y-"):
+        v = spacing_px(after(token, "gap-y-"))
+        if v != no_px():
+            s.gap_y = v
+        return true
+    if has(token, "gap-"):
+        v = spacing_px(after(token, "gap-"))
+        if v != no_px():
+            s.gap_x = v
+            s.gap_y = v
+        return true
+    return false
+
+# Width, height and the size- shorthand.
+def apply_size_token(s: Style, token: str) -> bool:
+    mut v = no_px()
+
+    # size-4 is the shorthand for equal width and height.
+    if has(token, "size-"):
+        v = spacing_px(after(token, "size-"))
+        if v != no_px():
+            s.w = v
+            s.h = v
+        return true
+
+    if has(token, "w-"):
+        mut wv = after(token, "w-")
+        if wv == "auto":
+            s.w = unset()
+            s.w_den = 0
+            return true
+        # w-screen is the viewport width. The root box already fills the
+        # viewport, so "fill my parent" is the same picture at every depth
+        # this renderer can express.
+        if wv == "screen":
+            apply_fraction_w(s, "full")
+            return true
+        if apply_fraction_w(s, wv):
+            return true
+        v = spacing_px(wv)
+        if v != no_px():
+            s.w = v
+            s.w_den = 0
+        return true
+
+    if has(token, "h-"):
+        mut hv = after(token, "h-")
+        if hv == "auto":
+            s.h = unset()
+            s.h_den = 0
+            return true
+        if hv == "screen":
+            apply_fraction_h(s, "full")
+            return true
+        if apply_fraction_h(s, hv):
+            return true
+        v = spacing_px(hv)
+        if v != no_px():
+            s.h = v
+            s.h_den = 0
+        return true
+    return false
+
+def apply_color_family_token(s: Style, token: str) -> bool:
+    if has(token, "bg-"):
+        mut c = resolve_color_token(after(token, "bg-"))
+        if c != unset():
+            s.bg = c
+        return true
+    if has(token, "text-"):
+        mut c = resolve_color_token(after(token, "text-"))
+        if c != unset():
+            s.fg = c
+        return true
+    return false
 
 # Apply one utility token to a style, in place. Unknown tokens are ignored
 # rather than fatal: UI content can arrive from outside the build, and a typo
-# in a class string must never be able to halt the renderer.
+# in a class string must never be able to halt the renderer. See this file's
+# header for the tokens that are ignored ON PURPOSE because the renderer has
+# no such concept.
 pub def apply_utility(s: Style, token: str) -> void:
     if token == "":
         return
 
-    if token == "flex-row":
-        s.dir = dir_row()
-        return
-    if token == "flex-col":
-        s.dir = dir_col()
-        return
-    if token == "grow":
-        s.grow = 1
-        return
-
-    if Str.starts_with(token, "p-"):
-        mut v = Str.slice(token, 2, Str.len(token))
-        if Str.is_digit(v):
-            s.pad = Str.parse_int(v)
-        return
-
-    if Str.starts_with(token, "gap-"):
-        mut v = Str.slice(token, 4, Str.len(token))
-        if Str.is_digit(v):
-            s.gap = Str.parse_int(v)
+    # Negative margins (-m-4, -mt-4, ...) re-enter with the sign stripped and
+    # then flip whatever the recursive call wrote, so the seven margin
+    # prefixes are spelled once rather than twice.
+    if has(token, "-"):
+        mut body = after(token, "-")
+        if has(body, "m"):
+            mut b_t = s.mar_t
+            mut b_r = s.mar_r
+            mut b_b = s.mar_b
+            mut b_l = s.mar_l
+            apply_utility(s, body)
+            s.mar_t = b_t - (s.mar_t - b_t)
+            s.mar_r = b_r - (s.mar_r - b_r)
+            s.mar_b = b_b - (s.mar_b - b_b)
+            s.mar_l = b_l - (s.mar_l - b_l)
         return
 
-    if Str.starts_with(token, "w-"):
-        mut v = Str.slice(token, 2, Str.len(token))
-        if Str.is_digit(v):
-            s.w = Str.parse_int(v)
+    if apply_flex_token(s, token):
         return
-
-    if Str.starts_with(token, "h-"):
-        mut v = Str.slice(token, 2, Str.len(token))
-        if Str.is_digit(v):
-            s.h = Str.parse_int(v)
+    if apply_edge_token(s, token):
         return
-
-    if Str.starts_with(token, "bg-"):
-        mut c = resolve_color_token(Str.slice(token, 3, Str.len(token)))
-        if c != unset():
-            s.bg = c
+    if apply_spacing_token(s, token):
         return
-
-    if Str.starts_with(token, "text-"):
-        mut c = resolve_color_token(Str.slice(token, 5, Str.len(token)))
-        if c != unset():
-            s.fg = c
+    if apply_size_token(s, token):
         return
-
-    if Str.starts_with(token, "border-"):
-        mut bc = resolve_color_token(Str.slice(token, 7, Str.len(token)))
-        if bc != unset():
-            s.border = bc
+    if apply_color_family_token(s, token):
         return
-
-    if Str.starts_with(token, "bw-"):
-        mut v = Str.slice(token, 3, Str.len(token))
-        if Str.is_digit(v):
-            s.border_w = Str.parse_int(v)
-        return
-
-    if Str.starts_with(token, "radius-"):
-        mut v = Str.slice(token, 7, Str.len(token))
-        if Str.is_digit(v):
-            s.radius = Str.parse_int(v)
-        return
-
 pub class StyleCache:
     pub cache:  Dict[str, Style]
     pub hits:   int

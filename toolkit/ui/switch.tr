@@ -1,0 +1,73 @@
+# toolkit.ui.switch — an on/off toggle with an animated sliding knob.
+#
+# Host-owned, same pattern as toolkit.ui.checkbox.Checkbox / TextInput (see
+# either for the underlying "why host-owned" rationale).
+#
+#   mut notifications = Switch.init(true)
+#   ...
+#   if clicked: notifications.click_inside(mx, my, fx, fy, 44, 24)
+#   notifications.tick()          # every frame, animates the knob
+#   notifications.paint(canvas, fx, fy, 44, 24)
+
+from toolkit.render.canvas import Canvas
+from toolkit.ui.interp import paint_rounded_rect_aa, fill_circle_aa
+
+pub class Switch:
+    pub on:       bool
+    pub knob_pos: int   # 0..100, animated toward on's target each tick()
+    pub track_off: int
+    pub track_on:  int
+    pub knob:      int
+    # See Checkbox.page_bg's comment -- same reason, same default.
+    pub page_bg:   int
+
+extend Switch:
+    pub def init(on: bool) -> Switch:
+        mut s = Switch()
+        s.on = on
+        if on:
+            s.knob_pos = 100
+        else:
+            s.knob_pos = 0
+        s.track_off = 0xCBD5E1
+        s.track_on = 0x3B82F6
+        s.knob = 0xFFFFFF
+        s.page_bg = 0x0B1120
+        return s
+
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        mut inside = mx >= x and mx < x + w and my >= y and my < y + h
+        if inside:
+            self.on = not self.on
+        return inside
+
+    # Steps knob_pos toward its target (0 or 100) by a fixed amount per call
+    # -- the same "call once per frame" contract as TextInput.tick(), just
+    # driving a linear slide instead of a blink phase. At a ~16ms frame
+    # period (see examples/desktop_demo's SDL_Delay(16)) this covers the
+    # 0..100 range in well under a quarter second -- fast enough to read as
+    # responsive, slow enough to actually see it slide rather than snap.
+    pub def tick(self) -> void:
+        mut target = 0
+        if self.on:
+            target = 100
+        if self.knob_pos < target:
+            self.knob_pos = self.knob_pos + 12
+            if self.knob_pos > target:
+                self.knob_pos = target
+        elif self.knob_pos > target:
+            self.knob_pos = self.knob_pos - 12
+            if self.knob_pos < target:
+                self.knob_pos = target
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        mut track = self.track_off
+        if self.on:
+            track = self.track_on
+        paint_rounded_rect_aa(c, x, y, w, h, h / 2, track, self.page_bg)
+
+        mut r = h / 2 - 2
+        mut travel = w - h
+        mut knob_x = x + h / 2 + travel * self.knob_pos / 100
+        mut knob_y = y + h / 2
+        fill_circle_aa(c, knob_x, knob_y, r, self.knob, track)

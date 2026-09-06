@@ -1,0 +1,135 @@
+# toolkit.ui.slider — a draggable value control.
+#
+# Host-owned, same rationale as every other widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). Unlike a click-toggle widget, dragging needs
+# TWO calls per frame rather than one discrete click event:
+#   mut volume = Slider.init(0, 100, 70)
+#   ...
+#   if mouse_button_went_down_this_frame:
+#       volume.press_inside(mx, my, fx, fy, fw, fh)
+#   if mdown:                      # SdlCanvas's mouse_state() 3rd return value
+#       volume.drag_to(mx)         # call every frame the button is held
+#   else:
+#       volume.dragging = false
+#   ...
+#   volume.paint(canvas, fx, fy, fw, fh)
+#
+# press_inside/drag_to are split rather than one click_inside like
+# Checkbox/Switch because a slider's value changes continuously WHILE the
+# button stays down, not just at the moment of the initial click -- there is
+# no single "the click landed, now flip one bool" moment to capture the whole
+# interaction in.
+
+from toolkit.render.canvas import Canvas
+from toolkit.ui.interp import paint_rounded_rect_aa, fill_circle_ring_aa
+
+pub class Slider:
+    pub min:      int
+    pub max:      int
+    pub value:    int
+    pub dragging: bool
+    pub track:    int
+    pub fill:     int
+    pub thumb:    int
+    pub thumb_border: int
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
+    # default.
+    pub page_bg:  int
+    # value_to_x/x_to_value both need the widget's own rect, but drag_to's
+    # call site (examples/widgets_demo) doesn't have a natural place to keep
+    # re-passing x/w every single frame while dragging (unlike press_inside,
+    # which already gets the full rect once, at the moment of the click) --
+    # paint() stashes it here so drag_to only needs the moving mx.
+    pub origin_x: int
+    pub origin_w: int
+
+extend Slider:
+    pub def init(min: int, max: int, value: int) -> Slider:
+        mut s = Slider()
+        s.min = min
+        s.max = max
+        s.dragging = false
+        s.track = 0xE2E8F0
+        s.fill = 0x3B82F6
+        s.thumb = 0xFFFFFF
+        s.thumb_border = 0x3B82F6
+        s.value = min
+        s.origin_x = 0
+        s.origin_w = 0
+        s.page_bg = 0x0B1120
+        s.set_value(value)
+        return s
+
+    pub def set_value(self, value: int) -> void:
+        mut v = value
+        if v < self.min:
+            v = self.min
+        if v > self.max:
+            v = self.max
+        self.value = v
+
+    def value_to_x(self, x: int, w: int) -> int:
+        mut span = self.max - self.min
+        if span <= 0:
+            return x
+        mut travel = w - travel_margin() * 2
+        return x + travel_margin() + travel * (self.value - self.min) / span
+
+    def x_to_value(self, mx: int, x: int, w: int) -> int:
+        mut span = self.max - self.min
+        if span <= 0:
+            return self.min
+        mut travel = w - travel_margin() * 2
+        if travel <= 0:
+            return self.min
+        mut rel = mx - x - travel_margin()
+        if rel < 0:
+            rel = 0
+        if rel > travel:
+            rel = travel
+        return self.min + span * rel / travel
+
+    # Starts a drag only if the click landed on or near the thumb's current
+    # position -- clicking elsewhere on the track does nothing on its own
+    # (a "click track to jump there" gesture is a reasonable future addition,
+    # not included here to keep this widget's first version small).
+    pub def press_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        if my < y or my >= y + h:
+            return false
+        mut tx = self.value_to_x(x, w)
+        mut hit_r = h
+        if mx < tx - hit_r or mx > tx + hit_r:
+            return false
+        self.dragging = true
+        return true
+
+    pub def drag_to(self, mx: int) -> void:
+        if not self.dragging:
+            return
+        self.set_value(self.x_to_value(mx, self.origin_x, self.origin_w))
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        self.origin_x = x
+        self.origin_w = w
+
+        mut track_h = 6
+        mut track_y = y + (h - track_h) / 2
+        paint_rounded_rect_aa(c, x + travel_margin(), track_y, w - travel_margin() * 2, track_h, track_h / 2, self.track, self.page_bg)
+
+        mut tx = self.value_to_x(x, w)
+        mut fill_w = tx - (x + travel_margin())
+        if fill_w > 0:
+            paint_rounded_rect_aa(c, x + travel_margin(), track_y, fill_w, track_h, track_h / 2, self.fill, self.track)
+
+        # The thumb straddles the fill/track boundary, so neither color is a
+        # fully correct backdrop for its own AA edge -- self.fill is the
+        # closer approximation in practice (the thumb sits right at the
+        # filled edge, so more of its ring overlaps fill than bare track).
+        mut r = h / 2
+        fill_circle_ring_aa(c, tx, y + h / 2, r, 3, self.thumb, self.thumb_border, self.fill)
+
+# Half the thumb's radius, roughly -- keeps the thumb from ever being asked to
+# sit exactly at the track's outer edge, where half of it would render past
+# the widget's own bounding box.
+def travel_margin() -> int:
+    return 10

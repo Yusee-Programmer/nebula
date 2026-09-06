@@ -826,16 +826,24 @@ Full detail and rationale in `docs/proposal/proposal-v3-cross-platform-engine.md
 by value delivered per unit of risk, not by dependency convenience. Each phase is
 independently shippable and leaves the repo working.
 
-**Phase 1 — unblock the freestanding tiers.** The difference between a rendering demo and a
-GUI engine, and the highest-value work available.
-1. **Per-frame arena reset.** The bump allocator never frees, so UEFI/bare-metal/embedded are
-   strictly single-frame. A mark/release turns them into real interactive tiers. Blocks
-   animation, redraw, and everything data-driven on three of six platform families.
-2. **A UEFI input driver.** Simple Pointer + Simple Text Input → `Event`. Everything
-   downstream already exists and is proven on desktop: `EventHandler` dispatch, hit-testing,
-   every widget's `click_inside`/`handle_key`, `textinput.tr`. **This produces the login
-   screen.** `render_interactive.tr` is the pattern; `boot.zig` is the reference for reaching
-   protocols beyond GOP.
+**Phase 1 — unblock the freestanding tiers. ✅ DONE (2026-09-06).** UEFI is now a live,
+interactive tier, not a still image.
+1. ~~Per-frame arena reset~~ — `toolkit/platform/arena.tr`, one shared arena with
+   `arena_mark()`/`arena_release()`, replacing the ~80-line allocator that was
+   copy-pasted into four programs. Verified on Cortex-M3: four renders, arena usage
+   identical across frames.
+2. ~~A UEFI input driver~~ — `examples/uefi_demo/boot_interactive.zig` +
+   `render_live.tr`. A real frame loop with AbsolutePointer (or SimplePointer) and
+   ConIn, hover feedback, click dispatch, a draggable slider, and Esc to exit.
+   **This is the login screen's foundation.**
+
+Three findings from Phase 1b, each recorded next to the code because each presents as
+something other than what it is — see `render_live.tr`'s header and the UEFI section above:
+a module-level `mut x = SomeClass.init()` initializes BEFORE `tauraro_heap_init` and
+silently stores a null; adding a USB device reshuffles OVMF's boot order onto the Shell
+(fixed with a generated `startup.nsh`, which also usefully *prints* crash reasons);
+and painting straight to the GOP scanout means a screenshot catches a half-drawn frame,
+which cost two rounds of chasing layout bugs that did not exist.
 
 **Phase 2 — the browser backend.** The biggest widening of reach, and it tests the
 portability claim against a platform maximally unlike the working ones. WASM `Canvas` into

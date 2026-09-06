@@ -262,7 +262,7 @@ before `templa` does.
 Ordered by value delivered per unit of risk, not by dependency convenience. Each phase is
 independently shippable and leaves the repo working.
 
-### Phase 1 — Unblock the freestanding tiers *(highest value)*
+### Phase 1 — Unblock the freestanding tiers ✅ DONE (2026-09-06)
 
 Two changes turn UEFI and bare metal from "renders a picture" into "runs an interface", and
 they are the difference between a rendering demo and a GUI engine.
@@ -273,7 +273,10 @@ they are the difference between a rendering demo and a GUI engine.
 - **1b. A UEFI input driver.** Simple Pointer + Simple Text Input → `Event`. Everything
   downstream already exists and is proven on desktop. **This produces the login screen.**
 
-*Exit:* `examples/uefi_demo` responds to a mouse and a keyboard, redrawing every frame.
+*Exit:* ✅ met. `examples/uefi_demo/render_live.tr` responds to a mouse and a keyboard,
+redrawing every frame, double-buffered. Delivered as `toolkit/platform/arena.tr` (one shared
+arena replacing four copy-pasted allocators) and `boot_interactive.zig` (the pointer and
+keyboard protocols the turnkey UEFI target cannot reach).
 
 ### Phase 2 — The browser backend
 

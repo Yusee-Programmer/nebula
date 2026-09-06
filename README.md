@@ -51,8 +51,8 @@ learns which platform it is on.
 |---|---|---|---|
 | Hosted (PPM) | `BufferCanvas` | synthetic | ✅ the dev loop |
 | Desktop (SDL2) | `SdlCanvas` | mouse, keyboard, wheel | ✅ live window, DPI-aware |
-| UEFI (GOP) | `GopCanvas` | — | ✅ renders; input driver is next |
-| Bare metal (MMIO) | `FrameBuffer` | — | ✅ Cortex-M3 under qemu |
+| UEFI (GOP) | `GopCanvas` | **mouse + keyboard** | ✅ **live interactive loop** |
+| Bare metal (MMIO) | `FrameBuffer` | — | ✅ Cortex-M3, multi-frame |
 | Browser (WASM) | — | — | planned |
 | Mobile (Android/iOS) | — | — | planned |
 

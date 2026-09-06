@@ -249,6 +249,59 @@ toolkit/layout/flex.tr        build/measure/place, row+col+gap+pad+grow (glyph s
 toolkit/ui/interp.tr          tree walk, real glyph painting, hit-test, handler allowlist
 examples/hosted_demo/         main.tr + app.ui + app.reload.ui
 ```
+## Class vocabulary: real Tailwind scales (changed 2026-09-06)
+
+**A number in a class name is a Tailwind SCALE STEP, not a pixel count.** `p-4` is 16px
+(4 x 0.25rem at a 16px root), where it used to mean 4px. Every `.ui` file and embedded
+markup string in the repo was migrated in the same commit; the migration was verified by
+byte-diffing the hosted demo's PPM output before and after, which is what proves the
+translation is *consistent*. Correctness against the published scale is proven separately
+by `verified-examples/tailwind_tokens.tr` (81 assertions).
+
+Three modules, imported downward only:
+
+- **`toolkit/ui/palette.tr`** — GENERATED, do not edit. 22 hues x 11 shades = 242 colors.
+  Regenerate with `scripts/gen-palette.sh` from `scripts/tailwind-palette.txt`. It is
+  generated because hand-typing 242 hex literals is a transcription-error machine and one
+  wrong nibble renders as a plausible-but-wrong color no test would catch.
+- **`toolkit/ui/scale.tr`** — token suffix -> pixels. Spacing follows Tailwind **v4's
+  dynamic rule** (any integer step is `n * 4px`, so `p-13` is 52px) plus the four
+  half-steps and `px`; radius and border-width are their own separate scales.
+- **`toolkit/ui/style.tr`** — decides which `Style` field a prefix targets, and nothing
+  else. Split into five per-family helpers; **read its header before merging them back
+  together** (see the `__chkstk` note below).
+
+### Gotchas worth knowing before writing markup
+
+- **`border-4` is 4 PIXELS, `p-4` is 16px.** Border widths are literal pixels in Tailwind
+  while spacing is a scale. That asymmetry is Tailwind's, not ours.
+- **A bare hue means shade 500.** `bg-red` == `bg-red-500`. This CHANGED three legacy
+  names: `bg-slate` used to be `0x1E293B`, which is actually slate-**800**. Markup now
+  spells the shade (`bg-slate-800`). `steel`/`mist` survive as nebula extensions.
+- **Arbitrary values** are Tailwind's own escape hatch and are supported wherever a scale
+  value is: `w-[460px]`, `p-[17px]`, `bg-[#0B1120]`. The unit is optional. This is what the
+  old `w-460` became, and it is deliberately uglier to type than `w-4` because reaching for
+  an exact pixel count should be a decision.
+- **Fractions are exact, not percentages.** `w-1/3` is carried as numerator/denominator and
+  resolved against the parent's content box at layout time, so three of them fill a 300px
+  row exactly (100 each). As 33% each they would leave a 3px gap.
+- **Unknown tokens are ignored, exactly like typos** — silently, because UI content can
+  arrive from outside the build and must never halt the renderer. `text-lg`, `shadow-md`,
+  `opacity-50`, `z-10`, `absolute` all parse and do nothing. Each is absent because the
+  renderer has no such concept, and `style.tr`'s header says which engine feature each
+  would need first. Adding any of them is an engine change first and a token second.
+
+### What the layout engine gained to support this
+
+Per-side padding (`px-`/`py-`/`pt-`/`pr-`/`pb-`/`pl-`/`ps-`/`pe-`), margins including
+negative (`-mt-4`), per-axis gap (`gap-x-`/`gap-y-`), fractional sizing (`w-1/2`, `w-full`,
+`w-screen`), and `justify-around`/`justify-evenly`. A child's margins count toward its
+parent's intrinsic size; a *fractional* child contributes nothing to it, matching CSS,
+because its size is not known until the parent's is.
+
+`examples/hosted_demo/tailwind.ui` exercises all of it and is rendered by
+`verified-examples/tailwind_layout.tr`, which dumps geometry that was checked by hand.
+
 
 ## UI markup format: XML-like, not indentation-based (changed 2026-09-03)
 
@@ -467,6 +520,45 @@ part is what's new, not "no zig at all". `boot.zig`/`build-uefi.ps1` still work 
 remain the reference for anything beyond the two-export convention (e.g. reading input devices,
 multiple windows, custom heap sizing).
 
+
+### A third UEFI-only failure: `__chkstk` (2026-09-06)
+
+**A function with a stack frame larger than 4KB fails to LINK on `--target uefi-x64`,
+and only there.** Found while building the Tailwind token table: `apply_utility` started
+life as one long if/elif chain over ~40 token prefixes, each branch with its own `mut`
+local. It compiled and ran correctly hosted, on Cortex-M, and in the SDL2 window; the
+UEFI link then failed with
+
+```
+lld-link: undefined symbol: __chkstk
+  note: referenced by module_toolkit_ui_style.c  (apply_utility)
+```
+
+`__chkstk` is the **Microsoft x64 ABI's stack-probe helper**. Any compiler targeting that
+ABI emits a call to it for a frame bigger than one 4KB page, so the guard page is touched
+in order rather than skipped over. UEFI shares the Microsoft x64 ABI (it is PE/COFF, which
+is the whole reason `_WIN32` gets predefined — see above) but is freestanding, so nothing
+supplies the helper.
+
+Not strictly a Tauraro bug: the codegen is doing the correct thing for the ABI. It is a
+**gap in the `uefi-x64` target**, which should either provide a `__chkstk` (it is ~10
+instructions) or compile with `-mno-stack-arg-probe`. Until it does, the constraint is
+real and worth knowing, because:
+
+- it is invisible on every other tier, so it surfaces long after the code looks correct;
+- the error names a symbol that appears nowhere in your source;
+- the trigger is *total locals in one function*, not recursion or allocation, so it grows
+  silently as a function accumulates branches.
+
+Worked around in `toolkit/ui/style.tr` by splitting the chain into five per-family helpers
+(`apply_flex_token`, `apply_edge_token`, `apply_spacing_token`, `apply_size_token`,
+`apply_color_family_token`), which keeps every frame well under a page and reads better
+anyway. That file's header carries the same warning next to the code, so the split does not
+get "tidied" back into one function later.
+
+> **Note:** `tau_bugs.txt`, referenced throughout this file as the running defect log, is
+> **not present in the repo** — it appears never to have been committed. Findings like this
+> one are being recorded here instead until it reappears.
 ### Two new bugs found getting here (full detail in `tau_bugs.txt` #12)
 
 - zig's `x86_64-uefi` target legitimately predefines `_WIN32`/`_WIN64`/`_MSC_VER` (UEFI really

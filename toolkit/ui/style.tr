@@ -340,6 +340,289 @@ def apply_fraction_h(s: Style, v: str) -> bool:
     s.h = unset()
     return true
 
+
+# ## Why this is five functions and not one
+#
+# apply_utility was originally a single long if/elif chain. It compiled and
+# ran fine on every hosted tier, and failed to LINK on UEFI:
+#
+#   lld-link: undefined symbol: __chkstk   (referenced by apply_utility)
+#
+# __chkstk is the Microsoft x64 ABI's stack-probe helper. A compiler emits a
+# call to it for any function whose stack frame exceeds one 4KB page, so that
+# the guard page is touched in order; UEFI shares the Microsoft x64 ABI (it is
+# PE/COFF) but is freestanding, so nothing provides the helper. Every `mut`
+# in every branch of that chain got its own frame slot, and forty-odd of them
+# crossed the page.
+#
+# Splitting the chain by token family keeps each frame well under a page, and
+# is the shape the code wanted anyway. Each helper returns whether it consumed
+# the token, so apply_utility reads as a dispatch list.
+#
+# Keep this in mind before merging these back together or adding a sixth
+# family inline: the failure is a link error on one tier only, long after the
+# code looks correct everywhere else.
+
+# Direction, flex, alignment. No spacing values, so no scale lookups.
+def apply_flex_token(s: Style, token: str) -> bool:
+    if token == "flex-row":
+        s.dir = dir_row()
+        return true
+    if token == "flex-col":
+        s.dir = dir_col()
+        return true
+    if token == "grow":
+        s.grow = 1
+        return true
+    if token == "grow-0":
+        s.grow = 0
+        return true
+    # flex-1 in CSS is grow + shrink + basis-0. There is no shrink here, so it
+    # collapses to grow -- the visible result matches for the common case of
+    # children that already fit.
+    if token == "flex-1":
+        s.grow = 1
+        return true
+
+    if token == "justify-start":
+        s.justify = align_start()
+        return true
+    if token == "justify-center":
+        s.justify = align_center()
+        return true
+    if token == "justify-end":
+        s.justify = align_end()
+        return true
+    if token == "justify-between":
+        s.justify = align_between()
+        return true
+    if token == "justify-around":
+        s.justify = align_around()
+        return true
+    if token == "justify-evenly":
+        s.justify = align_evenly()
+        return true
+
+    if token == "items-stretch":
+        s.align = align_stretch()
+        return true
+    if token == "items-start":
+        s.align = align_start()
+        return true
+    if token == "items-center":
+        s.align = align_center()
+        return true
+    if token == "items-end":
+        s.align = align_end()
+        return true
+    # No per-box baseline metric is tracked (every glyph cell is the same
+    # height), so baseline and start are the same picture here.
+    if token == "items-baseline":
+        s.align = align_start()
+        return true
+    return false
+
+# Radius and border. Border width is tried before border color: the width
+# suffixes are a closed set of four numbers plus a bracketed literal, none of
+# which can collide with a hue name, so the order is unambiguous.
+def apply_edge_token(s: Style, token: str) -> bool:
+    if token == "rounded":
+        s.radius = radius_px("")
+        return true
+    if has(token, "rounded-"):
+        mut rv = radius_px(after(token, "rounded-"))
+        if rv != no_px():
+            s.radius = rv
+        return true
+    if token == "border":
+        s.border_w = border_px("")
+        return true
+    if has(token, "border-"):
+        mut bv = after(token, "border-")
+        mut bw = border_px(bv)
+        if bw != no_px():
+            s.border_w = bw
+            return true
+        mut bc = resolve_color_token(bv)
+        if bc != unset():
+            s.border = bc
+        return true
+    return false
+
+# Padding, margin and gap -- everything that reads the spacing scale. One
+# local `v` reused by every branch, deliberately: see the __chkstk note above.
+def apply_spacing_token(s: Style, token: str) -> bool:
+    mut v = no_px()
+
+    if has(token, "px-"):
+        v = spacing_px(after(token, "px-"))
+        if v != no_px():
+            s.pad_l = v
+            s.pad_r = v
+        return true
+    if has(token, "py-"):
+        v = spacing_px(after(token, "py-"))
+        if v != no_px():
+            s.pad_t = v
+            s.pad_b = v
+        return true
+    if has(token, "pt-"):
+        v = spacing_px(after(token, "pt-"))
+        if v != no_px():
+            s.pad_t = v
+        return true
+    if has(token, "pr-"):
+        v = spacing_px(after(token, "pr-"))
+        if v != no_px():
+            s.pad_r = v
+        return true
+    if has(token, "pb-"):
+        v = spacing_px(after(token, "pb-"))
+        if v != no_px():
+            s.pad_b = v
+        return true
+    if has(token, "pl-"):
+        v = spacing_px(after(token, "pl-"))
+        if v != no_px():
+            s.pad_l = v
+        return true
+    # ps-/pe- are the CSS logical (start/end) properties. This renderer is
+    # left-to-right only, so they are plain aliases for pl-/pr-.
+    if has(token, "ps-"):
+        v = spacing_px(after(token, "ps-"))
+        if v != no_px():
+            s.pad_l = v
+        return true
+    if has(token, "pe-"):
+        v = spacing_px(after(token, "pe-"))
+        if v != no_px():
+            s.pad_r = v
+        return true
+    if has(token, "p-"):
+        v = spacing_px(after(token, "p-"))
+        if v != no_px():
+            set_pad_all(s, v)
+        return true
+
+    if has(token, "mx-"):
+        v = spacing_px(after(token, "mx-"))
+        if v != no_px():
+            s.mar_l = v
+            s.mar_r = v
+        return true
+    if has(token, "my-"):
+        v = spacing_px(after(token, "my-"))
+        if v != no_px():
+            s.mar_t = v
+            s.mar_b = v
+        return true
+    if has(token, "mt-"):
+        v = spacing_px(after(token, "mt-"))
+        if v != no_px():
+            s.mar_t = v
+        return true
+    if has(token, "mr-"):
+        v = spacing_px(after(token, "mr-"))
+        if v != no_px():
+            s.mar_r = v
+        return true
+    if has(token, "mb-"):
+        v = spacing_px(after(token, "mb-"))
+        if v != no_px():
+            s.mar_b = v
+        return true
+    if has(token, "ml-"):
+        v = spacing_px(after(token, "ml-"))
+        if v != no_px():
+            s.mar_l = v
+        return true
+    if has(token, "m-"):
+        v = spacing_px(after(token, "m-"))
+        if v != no_px():
+            set_mar_all(s, v)
+        return true
+
+    if has(token, "gap-x-"):
+        v = spacing_px(after(token, "gap-x-"))
+        if v != no_px():
+            s.gap_x = v
+        return true
+    if has(token, "gap-y-"):
+        v = spacing_px(after(token, "gap-y-"))
+        if v != no_px():
+            s.gap_y = v
+        return true
+    if has(token, "gap-"):
+        v = spacing_px(after(token, "gap-"))
+        if v != no_px():
+            s.gap_x = v
+            s.gap_y = v
+        return true
+    return false
+
+# Width, height and the size- shorthand.
+def apply_size_token(s: Style, token: str) -> bool:
+    mut v = no_px()
+
+    # size-4 is the shorthand for equal width and height.
+    if has(token, "size-"):
+        v = spacing_px(after(token, "size-"))
+        if v != no_px():
+            s.w = v
+            s.h = v
+        return true
+
+    if has(token, "w-"):
+        mut wv = after(token, "w-")
+        if wv == "auto":
+            s.w = unset()
+            s.w_den = 0
+            return true
+        # w-screen is the viewport width. The root box already fills the
+        # viewport, so "fill my parent" is the same picture at every depth
+        # this renderer can express.
+        if wv == "screen":
+            apply_fraction_w(s, "full")
+            return true
+        if apply_fraction_w(s, wv):
+            return true
+        v = spacing_px(wv)
+        if v != no_px():
+            s.w = v
+            s.w_den = 0
+        return true
+
+    if has(token, "h-"):
+        mut hv = after(token, "h-")
+        if hv == "auto":
+            s.h = unset()
+            s.h_den = 0
+            return true
+        if hv == "screen":
+            apply_fraction_h(s, "full")
+            return true
+        if apply_fraction_h(s, hv):
+            return true
+        v = spacing_px(hv)
+        if v != no_px():
+            s.h = v
+            s.h_den = 0
+        return true
+    return false
+
+def apply_color_family_token(s: Style, token: str) -> bool:
+    if has(token, "bg-"):
+        mut c = resolve_color_token(after(token, "bg-"))
+        if c != unset():
+            s.bg = c
+        return true
+    if has(token, "text-"):
+        mut c = resolve_color_token(after(token, "text-"))
+        if c != unset():
+            s.fg = c
+        return true
+    return false
+
 # Apply one utility token to a style, in place. Unknown tokens are ignored
 # rather than fatal: UI content can arrive from outside the build, and a typo
 # in a class string must never be able to halt the renderer. See this file's
@@ -349,10 +632,9 @@ pub def apply_utility(s: Style, token: str) -> void:
     if token == "":
         return
 
-    # --- negative margins: -m-4, -mt-4, ... ------------------------------
-    # Handled by re-entering with the sign stripped and then flipping whatever
-    # the recursive call wrote, so the seven margin prefixes below are spelled
-    # once rather than twice.
+    # Negative margins (-m-4, -mt-4, ...) re-enter with the sign stripped and
+    # then flip whatever the recursive call wrote, so the seven margin
+    # prefixes are spelled once rather than twice.
     if has(token, "-"):
         mut body = after(token, "-")
         if has(body, "m"):
@@ -367,256 +649,16 @@ pub def apply_utility(s: Style, token: str) -> void:
             s.mar_l = b_l - (s.mar_l - b_l)
         return
 
-    # --- direction / flex ------------------------------------------------
-    if token == "flex-row":
-        s.dir = dir_row()
+    if apply_flex_token(s, token):
         return
-    if token == "flex-col":
-        s.dir = dir_col()
+    if apply_edge_token(s, token):
         return
-    if token == "grow":
-        s.grow = 1
+    if apply_spacing_token(s, token):
         return
-    if token == "grow-0":
-        s.grow = 0
+    if apply_size_token(s, token):
         return
-    # flex-1 in CSS is grow + shrink + basis-0. There is no shrink here, so it
-    # collapses to grow -- the visible result matches for the common case of
-    # children that already fit.
-    if token == "flex-1":
-        s.grow = 1
+    if apply_color_family_token(s, token):
         return
-
-    # --- alignment -------------------------------------------------------
-    if token == "justify-start":
-        s.justify = align_start()
-        return
-    if token == "justify-center":
-        s.justify = align_center()
-        return
-    if token == "justify-end":
-        s.justify = align_end()
-        return
-    if token == "justify-between":
-        s.justify = align_between()
-        return
-    if token == "justify-around":
-        s.justify = align_around()
-        return
-    if token == "justify-evenly":
-        s.justify = align_evenly()
-        return
-
-    if token == "items-stretch":
-        s.align = align_stretch()
-        return
-    if token == "items-start":
-        s.align = align_start()
-        return
-    if token == "items-center":
-        s.align = align_center()
-        return
-    if token == "items-end":
-        s.align = align_end()
-        return
-    # No per-box baseline metric is tracked (every glyph cell is the same
-    # height), so baseline and start are the same picture here.
-    if token == "items-baseline":
-        s.align = align_start()
-        return
-
-    # --- radius ----------------------------------------------------------
-    if token == "rounded":
-        s.radius = radius_px("")
-        return
-    if has(token, "rounded-"):
-        mut rv = radius_px(after(token, "rounded-"))
-        if rv != no_px():
-            s.radius = rv
-        return
-
-    # --- border ----------------------------------------------------------
-    # Width first, then color: the width suffixes are a closed set of four
-    # numbers plus a bracketed literal, none of which can collide with a hue
-    # name, so trying width first is unambiguous.
-    if token == "border":
-        s.border_w = border_px("")
-        return
-    if has(token, "border-"):
-        mut bv = after(token, "border-")
-        mut bw = border_px(bv)
-        if bw != no_px():
-            s.border_w = bw
-            return
-        mut bc = resolve_color_token(bv)
-        if bc != unset():
-            s.border = bc
-        return
-
-    # --- padding ---------------------------------------------------------
-    if has(token, "px-"):
-        mut v = spacing_px(after(token, "px-"))
-        if v != no_px():
-            s.pad_l = v
-            s.pad_r = v
-        return
-    if has(token, "py-"):
-        mut v = spacing_px(after(token, "py-"))
-        if v != no_px():
-            s.pad_t = v
-            s.pad_b = v
-        return
-    if has(token, "pt-"):
-        mut v = spacing_px(after(token, "pt-"))
-        if v != no_px():
-            s.pad_t = v
-        return
-    if has(token, "pr-"):
-        mut v = spacing_px(after(token, "pr-"))
-        if v != no_px():
-            s.pad_r = v
-        return
-    if has(token, "pb-"):
-        mut v = spacing_px(after(token, "pb-"))
-        if v != no_px():
-            s.pad_b = v
-        return
-    if has(token, "pl-"):
-        mut v = spacing_px(after(token, "pl-"))
-        if v != no_px():
-            s.pad_l = v
-        return
-    # ps-/pe- are the CSS logical (start/end) properties. This renderer is
-    # left-to-right only, so they are plain aliases for pl-/pr-.
-    if has(token, "ps-"):
-        mut v = spacing_px(after(token, "ps-"))
-        if v != no_px():
-            s.pad_l = v
-        return
-    if has(token, "pe-"):
-        mut v = spacing_px(after(token, "pe-"))
-        if v != no_px():
-            s.pad_r = v
-        return
-    if has(token, "p-"):
-        mut v = spacing_px(after(token, "p-"))
-        if v != no_px():
-            set_pad_all(s, v)
-        return
-
-    # --- margin ----------------------------------------------------------
-    if has(token, "mx-"):
-        mut v = spacing_px(after(token, "mx-"))
-        if v != no_px():
-            s.mar_l = v
-            s.mar_r = v
-        return
-    if has(token, "my-"):
-        mut v = spacing_px(after(token, "my-"))
-        if v != no_px():
-            s.mar_t = v
-            s.mar_b = v
-        return
-    if has(token, "mt-"):
-        mut v = spacing_px(after(token, "mt-"))
-        if v != no_px():
-            s.mar_t = v
-        return
-    if has(token, "mr-"):
-        mut v = spacing_px(after(token, "mr-"))
-        if v != no_px():
-            s.mar_r = v
-        return
-    if has(token, "mb-"):
-        mut v = spacing_px(after(token, "mb-"))
-        if v != no_px():
-            s.mar_b = v
-        return
-    if has(token, "ml-"):
-        mut v = spacing_px(after(token, "ml-"))
-        if v != no_px():
-            s.mar_l = v
-        return
-    if has(token, "m-"):
-        mut v = spacing_px(after(token, "m-"))
-        if v != no_px():
-            set_mar_all(s, v)
-        return
-
-    # --- gap -------------------------------------------------------------
-    if has(token, "gap-x-"):
-        mut v = spacing_px(after(token, "gap-x-"))
-        if v != no_px():
-            s.gap_x = v
-        return
-    if has(token, "gap-y-"):
-        mut v = spacing_px(after(token, "gap-y-"))
-        if v != no_px():
-            s.gap_y = v
-        return
-    if has(token, "gap-"):
-        mut v = spacing_px(after(token, "gap-"))
-        if v != no_px():
-            s.gap_x = v
-            s.gap_y = v
-        return
-
-    # --- sizing ----------------------------------------------------------
-    # size-4 is the shorthand for equal width and height.
-    if has(token, "size-"):
-        mut v = spacing_px(after(token, "size-"))
-        if v != no_px():
-            s.w = v
-            s.h = v
-        return
-    if has(token, "w-"):
-        mut wv = after(token, "w-")
-        if wv == "auto":
-            s.w = unset()
-            s.w_den = 0
-            return
-        # w-screen is the viewport width. The root box already fills the
-        # viewport, so "fill my parent" is the same picture at every depth
-        # this renderer can express.
-        if wv == "screen":
-            apply_fraction_w(s, "full")
-            return
-        if apply_fraction_w(s, wv):
-            return
-        mut v = spacing_px(wv)
-        if v != no_px():
-            s.w = v
-            s.w_den = 0
-        return
-    if has(token, "h-"):
-        mut hv = after(token, "h-")
-        if hv == "auto":
-            s.h = unset()
-            s.h_den = 0
-            return
-        if hv == "screen":
-            apply_fraction_h(s, "full")
-            return
-        if apply_fraction_h(s, hv):
-            return
-        mut v = spacing_px(hv)
-        if v != no_px():
-            s.h = v
-            s.h_den = 0
-        return
-
-    # --- colors ----------------------------------------------------------
-    if has(token, "bg-"):
-        mut c = resolve_color_token(after(token, "bg-"))
-        if c != unset():
-            s.bg = c
-        return
-    if has(token, "text-"):
-        mut c = resolve_color_token(after(token, "text-"))
-        if c != unset():
-            s.fg = c
-        return
-
 pub class StyleCache:
     pub cache:  Dict[str, Style]
     pub hits:   int

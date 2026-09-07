@@ -13,6 +13,7 @@
 from toolkit.types import Event, EventHandler, event_name_for_kind, ev_key, rgb, red_of, green_of, blue_of
 from toolkit.ui.ast import UiNode, max_depth
 from toolkit.ui.style import StyleCache, unset
+from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text
 from toolkit.layout.flex import LayoutBox, layout_tree, kind_text
 from toolkit.render.canvas import Canvas
 from toolkit.text.font import Font
@@ -86,7 +87,12 @@ extend Interpreter:
         self.root = layout_tree(node, self.cache, c.width(), c.height())
         self.has_root = true
         self.renders = self.renders + 1
-        self.paint(self.root, c, self.root_bg)
+        # Two passes now, not one: emit a scene, then execute it. The split
+        # is invisible from here on purpose -- every Canvas backend keeps
+        # working unchanged, and the scene graph stays an internal detail
+        # rather than a breaking change to the four shipping tiers.
+        mut scene = self.build_scene(self.root_bg)
+        execute_software(scene, c, self.font)
 
     # `ambient_bg` is the flat color already sitting behind THIS box, before
     # anything below paints over it -- the canvas clear color at the root,
@@ -103,7 +109,16 @@ extend Interpreter:
     # bare-metal/UEFI framebuffers are plain write-only memory and genuinely
     # cannot blend even in principle, so this had to be solved by tracking
     # the answer ourselves, not by asking the backend.
-    def paint(self, box: LayoutBox, c: Canvas, ambient_bg: int) -> void:
+    # Walks the laid-out tree and EMITS paint commands rather than painting.
+    # The logic is exactly what paint() used to do -- hover/press darkening,
+    # the ambient-backdrop cascade, bordered vs plain boxes -- with the
+    # canvas calls replaced by scene.add(). Splitting it this way is what
+    # makes diffing and sub-rect rendering possible; see toolkit/render/scene.tr.
+    #
+    # Still a private recursive method returning void, which is the safe
+    # shape on the freestanding tiers: a recursive method returning `str` is
+    # the one that hangs there (bugs.txt, "not bugs" section).
+    def emit(self, box: LayoutBox, scene: Scene, ambient_bg: int) -> void:
         # Native-like hover/pressed feedback: only for boxes an author wired
         # to an event (event_name != "") -- a plain decorative panel never
         # darkens just because the cursor happens to be over it.
@@ -130,11 +145,11 @@ extend Interpreter:
 
         mut has_border = border != unset() and box.style.border_w > 0
         if has_border:
-            # Fill + ring + outer edge in one pass -- see
+            # Fill + ring + outer edge in ONE command -- see
             # paint_rounded_box_aa's comment for why this is not two nested
-            # paint_rounded_rect_aa calls (the short version: two overlapping
-            # antialiased ramps cannot be made to agree, and leave a halo
-            # tracing every corner).
+            # rounded rects (the short version: two overlapping antialiased
+            # ramps cannot be made to agree, and leave a halo tracing every
+            # corner).
             #
             # A bordered box with no background of its own is a genuine
             # outline: the ring's inside shows whatever was already behind
@@ -142,21 +157,29 @@ extend Interpreter:
             mut inner_fill = bg
             if bg == unset():
                 inner_fill = ambient_bg
-            paint_rounded_box_aa(c, box.x, box.y, box.w, box.h, box.style.radius, box.style.border_w, inner_fill, border, ambient_bg)
+            scene.add(Cmd.rounded_box(box.x, box.y, box.w, box.h, box.style.radius, box.style.border_w, inner_fill, border, ambient_bg))
         elif bg != unset():
-            paint_rounded_rect_aa(c, box.x, box.y, box.w, box.h, box.style.radius, bg, ambient_bg)
+            scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, box.style.radius, bg, ambient_bg))
 
         if box.kind == kind_text():
             # Text sits directly on THIS box's own resolved surface (its own
             # bg if it set one, otherwise whatever shows through it) -- not
             # on `ambient_bg`, which is what's behind the box as a WHOLE, a
             # different thing whenever the box itself painted something.
-            self.paint_text(box, c, child_ambient)
+            scene.add(Cmd.label(box.x, box.y, box.text, box.style.fg, child_ambient))
 
         mut i = 0
         while i < len(box.children):
-            self.paint(box.children[i], c, child_ambient)
+            self.emit(box.children[i], scene, child_ambient)
             i = i + 1
+
+    # Builds the scene for the current tree without painting it. Public so a
+    # caller can inspect, translate or diff a frame before it is drawn.
+    pub def build_scene(self, ambient_bg: int) -> Scene:
+        mut scene = Scene.init()
+        if self.has_root:
+            self.emit(self.root, scene, ambient_bg)
+        return scene
 
     # (paint_rounded_rect_aa / paint_corner_aa are free functions below --
     # see their own comments for why: Canvas has no fill-rounded-rect or
@@ -740,3 +763,24 @@ pub def register_handler(it: Interpreter, name: str, h: EventHandler) -> void:
 # callers should prefer this over Interpreter.render.
 pub def render_to(it: Interpreter, node: Pointer[UiNode], c: Canvas) -> void:
     it.render(node, c)
+
+# Replays a scene onto any Canvas, using the same rasterizer primitives the
+# interpreter used to call directly. This is the whole compatibility story
+# for the scene graph: BufferCanvas, FrameBuffer, GopCanvas, WebCanvas and
+# SdlCanvas are untouched, because the commands bottom out in exactly the
+# functions they already supported.
+#
+# Kept in this module rather than in toolkit/render/scene.tr because the
+# primitives live here, and scene.tr must import nothing to stay off the
+# import cycle (Tauraro rejects circular imports).
+pub def execute_software(scene: Scene, c: Canvas, font: Font) -> void:
+    mut i = 0
+    while i < len(scene.cmds):
+        mut cmd = scene.cmds[i]
+        if cmd.kind == cmd_rounded_rect():
+            paint_rounded_rect_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.fill, cmd.ambient)
+        elif cmd.kind == cmd_rounded_box():
+            paint_rounded_box_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
+        elif cmd.kind == cmd_text():
+            draw_text(c, font, cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
+        i = i + 1

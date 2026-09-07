@@ -1,0 +1,132 @@
+# toolkit.render.scene — the scene graph: what to paint, separated from painting.
+#
+# Until now `Interpreter.paint` walked the LayoutBox tree and called
+# fill_rect/set_pixel as it went. That works, and it is what four shipping
+# backends do today, but it forecloses three things the engine wants:
+#
+#   1. DIFFING. Comparing two flat command lists is tractable; comparing two
+#      tree traversals is not. Measured (proposal v4 5a), this is the only
+#      change that helps the tiers that are actually slow -- UEFI and bare
+#      metal, where a frame costs hundreds of milliseconds and there is no
+#      GPU to fall back on.
+#   2. SUB-RECT RENDERING. `layout_tree` always sizes its root to the whole
+#      canvas, so a second render_to() call repaints the entire surface and
+#      erases whatever chrome was already there. Every widget demo works
+#      around this by host-painting the dynamic part. Translating a command
+#      list is a much smaller thing than parameterising the paint traversal.
+#   3. A GPU renderer, if one is ever justified. You cannot batch set_pixel
+#      calls; you can batch a list of rounded rects. (Measured as NOT
+#      justified today -- see proposal v4 5a -- but the door stays open.)
+#
+# ## This module deliberately imports nothing
+#
+# toolkit.ui.interp owns both the emitter and the executor, and it already
+# imports the rasterizer primitives. If scene.tr called those primitives it
+# would have to import interp, which imports scene -- and Tauraro rejects
+# circular imports. So this file is pure data: the command vocabulary and a
+# list of commands, nothing that knows how to draw.
+#
+# ## Why a tagged class rather than an enum
+#
+# toolkit.ui.ast uses a real enum with Pointer boxing, because a UI tree is
+# recursive and variants differ structurally. A command list is flat and the
+# variants differ only in which fields matter, so a single tagged class costs
+# one allocation per command instead of one allocation plus a box, and it
+# needs no match arm to read a field. The unused fields are the price.
+
+pub def cmd_rounded_rect() -> int:
+    return 0
+
+pub def cmd_rounded_box() -> int:
+    return 1
+
+pub def cmd_text() -> int:
+    return 2
+
+pub class Cmd:
+    pub kind:     int
+    pub x:        int
+    pub y:        int
+    pub w:        int
+    pub h:        int
+    pub radius:   int
+    pub border_w: int
+    pub fill:     int
+    pub stroke:   int
+    # The flat colour already behind this command, which its antialiased
+    # edges blend toward. Canvas has no alpha and no destination read-back
+    # (RASTERIZER.md 0), so this has to be carried, not sampled.
+    pub ambient:  int
+    pub text:     str
+
+extend Cmd:
+    pub def rounded_rect(x: int, y: int, w: int, h: int, radius: int, fill: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_rounded_rect()
+        c.x = x
+        c.y = y
+        c.w = w
+        c.h = h
+        c.radius = radius
+        c.border_w = 0
+        c.fill = fill
+        c.stroke = 0
+        c.ambient = ambient
+        c.text = ""
+        return c
+
+    pub def rounded_box(x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, stroke: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_rounded_box()
+        c.x = x
+        c.y = y
+        c.w = w
+        c.h = h
+        c.radius = radius
+        c.border_w = border_w
+        c.fill = fill
+        c.stroke = stroke
+        c.ambient = ambient
+        c.text = ""
+        return c
+
+    pub def label(x: int, y: int, text: str, fg: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_text()
+        c.x = x
+        c.y = y
+        c.w = 0
+        c.h = 0
+        c.radius = 0
+        c.border_w = 0
+        c.fill = fg
+        c.stroke = 0
+        c.ambient = ambient
+        c.text = text
+        return c
+
+pub class Scene:
+    pub cmds: List[Cmd]
+
+extend Scene:
+    pub def init() -> Scene:
+        mut s = Scene()
+        s.cmds = []
+        return s
+
+    pub def add(self, c: Cmd) -> void:
+        self.cmds.append(c)
+
+    pub def len(self) -> int:
+        return len(self.cmds)
+
+    # Shifts every command by (dx, dy). This is the whole of sub-rect
+    # rendering: lay a tree out at the origin, then move its commands where
+    # they belong -- rather than teaching the layout engine about viewports.
+    pub def translate(self, dx: int, dy: int) -> void:
+        mut i = 0
+        while i < len(self.cmds):
+            mut c = self.cmds[i]
+            c.x = c.x + dx
+            c.y = c.y + dy
+            i = i + 1

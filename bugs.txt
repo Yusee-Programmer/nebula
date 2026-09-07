@@ -229,7 +229,7 @@ REPRO
 
 OBSERVED
   build/main.c:9:21: error: call to undeclared function 'OS_args'
-  build/main.c:11:89: error: member reference type 'int' is not a pointer
+  build/main.c:11:89: error: member referen ce type 'int' is not a pointer
 
 CAUSE
   `OS.args()` lowers to a bare `OS_args()` call that nothing declares or

@@ -14,7 +14,7 @@ from toolkit.types import Event, EventHandler, event_name_for_kind, ev_key, rgb,
 from toolkit.ui.ast import UiNode, max_depth
 from toolkit.ui.style import StyleCache, unset
 from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text
-from toolkit.layout.flex import LayoutBox, layout_tree, kind_text
+from toolkit.layout.flex import LayoutBox, layout_tree, layout_tree_at, kind_text
 from toolkit.render.canvas import Canvas
 from toolkit.text.font import Font
 from string.str import Str
@@ -92,6 +92,25 @@ extend Interpreter:
         # working unchanged, and the scene graph stays an internal detail
         # rather than a breaking change to the four shipping tiers.
         mut scene = self.build_scene(self.root_bg)
+        execute_software(scene, c, self.font)
+
+    # Renders a tree into a SUB-RECTANGLE instead of the whole canvas.
+    #
+    # `ambient` is what the sub-rect is being drawn on top of -- the colour
+    # its antialiased outer edges blend toward. It is a parameter rather than
+    # self.root_bg because the whole point of a sub-rect is that something
+    # else already painted there.
+    #
+    # self.root is replaced, so dispatch() hit-tests against THIS tree until
+    # the next render. A caller compositing several sub-rects and wanting
+    # clicks on all of them needs one Interpreter per region, or to re-render
+    # the region under the pointer before dispatching -- there is one root,
+    # by design, and pretending otherwise would be worse.
+    pub def render_rect(self, node: Pointer[UiNode], c: Canvas, x: int, y: int, w: int, h: int, ambient: int) -> void:
+        self.root = layout_tree_at(node, self.cache, x, y, w, h)
+        self.has_root = true
+        self.renders = self.renders + 1
+        mut scene = self.build_scene(ambient)
         execute_software(scene, c, self.font)
 
     # `ambient_bg` is the flat color already sitting behind THIS box, before
@@ -763,6 +782,14 @@ pub def register_handler(it: Interpreter, name: str, h: EventHandler) -> void:
 # callers should prefer this over Interpreter.render.
 pub def render_to(it: Interpreter, node: Pointer[UiNode], c: Canvas) -> void:
     it.render(node, c)
+
+# Sub-rect rendering. Same reason this is a free function as render_to: a
+# method call does not auto-upcast a concrete backend to the Canvas
+# interface, so `it.render_rect(tree, my_sdl_canvas, ...)` fails to compile
+# while passing the same value through a free function's interface parameter
+# upcasts without moving it.
+pub def render_into(it: Interpreter, node: Pointer[UiNode], c: Canvas, x: int, y: int, w: int, h: int, ambient: int) -> void:
+    it.render_rect(node, c, x, y, w, h, ambient)
 
 # Replays a scene onto any Canvas, using the same rasterizer primitives the
 # interpreter used to call directly. This is the whole compatibility story

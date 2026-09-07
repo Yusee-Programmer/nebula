@@ -119,14 +119,3 @@ extend Scene:
 
     pub def len(self) -> int:
         return len(self.cmds)
-
-    # Shifts every command by (dx, dy). This is the whole of sub-rect
-    # rendering: lay a tree out at the origin, then move its commands where
-    # they belong -- rather than teaching the layout engine about viewports.
-    pub def translate(self, dx: int, dy: int) -> void:
-        mut i = 0
-        while i < len(self.cmds):
-            mut c = self.cmds[i]
-            c.x = c.x + dx
-            c.y = c.y + dy
-            i = i + 1

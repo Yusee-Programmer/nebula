@@ -1,0 +1,92 @@
+# verified-examples/subrect_render.tr — sub-rect rendering (proposal v4, step D).
+#
+# Checks the two things render_into() has to get right, neither of which is
+# obvious from looking at a screenshot:
+#
+#   1. It does NOT erase what was already painted. Before this existed, a
+#      second render call sized its root to the whole canvas and repainted
+#      the entire surface -- which is why every widget demo host-painted its
+#      tab content instead of writing it as markup.
+#   2. The laid-out boxes carry ABSOLUTE coordinates. Hit-testing walks the
+#      same tree the painter does, so a sub-rect whose boxes were relative
+#      would paint in the right place and dispatch in the wrong one.
+#
+#   tauraroc --run verified-examples/subrect_render.tr
+
+from toolkit.ui.parser import UiParser
+from toolkit.ui.interp import Interpreter, render_to, render_into
+from toolkit.render.hosted.buffer import BufferCanvas
+from toolkit.types import Event
+from toolkit.layout.flex import dump_layout
+
+mut _pass: int = 0
+mut _fail: int = 0
+
+def check(label: str, got: int, want: int) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def check_bool(label: str, got: bool, want: bool) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def main():
+    mut W = 400
+    mut H = 300
+
+    # Full-canvas chrome: a page with a clickable button at the bottom.
+    mut chrome = "<panel \"flex-col p-4 gap-4 bg-slate-800\">\n  <panel \"h-10 bg-amber-500\" />\n  <panel \"grow\" />\n  <button \"h-10 bg-sky-500\" @on_click(on_ok)>\n    <text \"text-white\">OK</text>\n  </button>\n</panel>\n"
+    mut inner = "<panel \"flex-row gap-2\">\n  <panel \"grow bg-red-500\" />\n  <panel \"grow bg-green-500\" />\n</panel>\n"
+
+    mut cp = UiParser.init()
+    mut ctree = cp.parse(chrome)
+    mut ip = UiParser.init()
+    mut itree = ip.parse(inner)
+
+    mut it = Interpreter.init()
+    it.root_bg = 0x1E293B
+    mut sub = Interpreter.init()
+    sub.root_bg = 0x1E293B
+
+    mut canvas = BufferCanvas.init(W, H, 0x1E293B)
+    render_to(it, ctree, canvas)
+
+    # The amber strip at the top is chrome. Sample it before and after the
+    # sub-rect render; if render_into repainted the whole canvas it would be
+    # gone.
+    mut amber_before = canvas.get_px(20, 20)
+    check("chrome painted (amber strip)", amber_before, 0xF59E0B)
+
+    render_into(sub, itree, canvas, 40, 120, 320, 60, 0x1E293B)
+
+    mut amber_after = canvas.get_px(20, 20)
+    check("chrome SURVIVES sub-rect render", amber_after, 0xF59E0B)
+
+    # And the sub-rect actually landed where it was asked to.
+    check("sub-rect left half is red", canvas.get_px(60, 150), 0xEF4444)
+    check("sub-rect right half is green", canvas.get_px(340, 150), 0x22C55E)
+
+    print("sub-rect layout (absolute coords expected, origin 40,120):")
+    dump_layout(sub.root, 1)
+
+    check("sub root x is absolute", sub.root.x, 40)
+    check("sub root y is absolute", sub.root.y, 120)
+    check("sub root w matches request", sub.root.w, 320)
+    check("sub root h matches request", sub.root.h, 60)
+
+    # Hit-testing against the sub-rect tree works in canvas space, because the
+    # boxes are absolute. A point inside the sub-rect hits; one outside does not.
+    check_bool("contains() inside sub-rect", sub.root.contains(200, 150), true)
+    check_bool("contains() outside sub-rect", sub.root.contains(200, 40), false)
+
+    canvas.save_ppm("examples/hosted_demo/out_subrect.ppm")
+    print("")
+    print("passed=" + _pass.to_str() + " failed=" + _fail.to_str())
+    if _fail == 0:
+        print("ALL OK -- wrote examples/hosted_demo/out_subrect.ppm")

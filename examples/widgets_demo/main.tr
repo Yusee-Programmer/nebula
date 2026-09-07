@@ -28,7 +28,8 @@
 
 from toolkit.types import Event, EventHandler
 from toolkit.ui.parser import UiParser
-from toolkit.ui.interp import Interpreter, render_to, register_handler, paint_rounded_rect_aa, draw_text
+from toolkit.ui.interp import Interpreter, render_to, render_into, register_handler, paint_rounded_rect_aa, draw_text
+from toolkit.ui.ast import UiNode
 from toolkit.render.desktop.sdl_canvas import SdlCanvas, poll_event, last_click, last_key, last_wheel_delta, mouse_state
 from toolkit.render.desktop.sdl_bindings import SDL_Delay
 from toolkit.render.canvas import Canvas
@@ -42,35 +43,23 @@ from toolkit.ui.dropdown import Dropdown
 from toolkit.ui.tabs import Tabs
 from toolkit.ui.list import ScrollList
 
-# The two tabs' content, host-painted directly (fill_rect/paint_rounded_rect/
-# draw_text) rather than as a swapped UiNode tree -- see the note where this
-# is called in main(): toolkit.layout.flex.layout_tree always sizes the ROOT
-# of whatever tree it's given to fill the ENTIRE canvas passed to render_to
-# (c.width()/c.height()), because that is what a top-level page render is
-# supposed to do. There is no sub-rect/viewport parameter to ask it to lay
-# out into a small slot instead, so a second render_to call for tab content
-# would repaint the WHOLE window, erasing the header/footer chrome that was
-# already drawn. Still exercises the same Card/Divider/Badge composition
-# (paint_rounded_rect + a couple of pill shapes) those need in the markup
-# form, just called directly instead of parsed from a class string -- the
-# point either way is that no new widget code was needed for them.
-def paint_tab_content(c: Canvas, font: Font, idx: int, x: int, y: int, w: int, h: int) -> void:
-    mut page_bg = 0x0B1120
+# The two tabs' content, as REAL MARKUP rendered into a sub-rectangle.
+#
+# This used to be host-painted with raw fill_rect/paint_rounded_rect/draw_text
+# calls, and the long comment that stood here explained why: layout_tree
+# always sized the root of whatever tree it was given to fill the entire
+# canvas, so a second render_to() for the tab content repainted the whole
+# window and erased the header and footer chrome. Every widget demo in the
+# repo carried some version of that workaround.
+#
+# render_into() removes it. The tree below is parsed and laid out exactly like
+# the top-level page, just into (x, y, w, h) instead of the whole surface --
+# so tab content is now authored as markup, with the same class vocabulary,
+# instead of being drawn by hand.
+def tab_source(idx: int) -> str:
     if idx == 0:
-        mut gap = 8
-        mut card_w = (w - gap * 2) / 3
-        mut card_h = h
-        paint_rounded_rect_aa(c, x, y, card_w, card_h, 10, 0xEF4444, page_bg)
-        paint_rounded_rect_aa(c, x + card_w + gap, y, card_w, card_h, 10, 0x22C55E, page_bg)
-        paint_rounded_rect_aa(c, x + (card_w + gap) * 2, y, card_w, card_h, 10, 0x3B82F6, page_bg)
-        return
-
-    draw_text(c, font, "Widgets added this session:", x, y, 0xE2E8F0, page_bg)
-    c.fill_rect(x, y + 22, w, 2, 0x64748B)
-    paint_rounded_rect_aa(c, x, y + 34, 70, 26, 13, 0x3B82F6, page_bg)
-    draw_text(c, font, "8 NEW", x + 12, y + 42, 0xFFFFFF, 0x3B82F6)
-    paint_rounded_rect_aa(c, x + 80, y + 34, 60, 26, 13, 0x22C55E, page_bg)
-    draw_text(c, font, "LIVE", x + 92, y + 42, 0x0F172A, 0x22C55E)
+        return "<panel \"flex-row gap-2\">\n  <panel \"grow bg-red-500 rounded-[10px]\" />\n  <panel \"grow bg-green-500 rounded-[10px]\" />\n  <panel \"grow bg-blue-500 rounded-[10px]\" />\n</panel>\n"
+    return "<panel \"flex-col gap-2\">\n  <text \"text-slate-200\">Widgets added this session:</text>\n  <panel \"h-0.5 bg-slate-500\" />\n  <panel \"flex-row gap-2 h-6\">\n    <button \"w-[70px] bg-blue-500 rounded-full justify-center items-center\">\n      <text \"text-white\">8 NEW</text>\n    </button>\n    <button \"w-[60px] bg-green-500 rounded-full justify-center items-center\">\n      <text \"text-slate-900\">LIVE</text>\n    </button>\n  </panel>\n</panel>\n"
 
 # A small section-header label + a thin rule beneath it -- the same
 # Divider-as-plain-panel composition the file header comment calls out, just
@@ -129,6 +118,15 @@ def main():
     chrome_p.report()
 
     mut ui_font = Font.load()
+
+    # Tab content trees, parsed once. A separate Interpreter keeps their
+    # layout tree out of the page Interpreter's `root`, which dispatch()
+    # depends on -- see the note at the render_into call below.
+    mut tab_it = Interpreter.init()
+    tab_it.root_bg = 0x1E293B
+    mut tp0 = UiParser.init()
+    mut tp1 = UiParser.init()
+    mut tab_trees: List[Pointer[UiNode]] = [tp0.parse(tab_source(0)), tp1.parse(tab_source(1))]
 
     mut tabs = Tabs.init(["Cards", "Info"], 0)
     mut tx = 16
@@ -254,7 +252,19 @@ def main():
             render_to(it, chrome_tree, canvas)
 
             tabs.paint(canvas, tx, ty, tw, th)
-            paint_tab_content(canvas, ui_font, tabs.selected_index, content_x, content_y, content_w, content_h)
+            # Tab content as markup, rendered into its own sub-rectangle.
+            #
+            # A SECOND Interpreter, not the page one: render_rect replaces
+            # `root`, and the event drain at the top of this loop hit-tests
+            # against whatever root the previous frame left behind. Sharing
+            # one Interpreter would silently point OK/CANCEL at the tab tree.
+            #
+            # The ambient is the chrome root's bg-slate-800, not the canvas
+            # clear colour -- that is what these corners actually sit on. The
+            # host-painted version this replaced passed 0x0B1120 and blended
+            # every rounded corner toward a colour nothing had painted, since
+            # the chrome covers the window.
+            render_into(tab_it, tab_trees[tabs.selected_index], canvas, content_x, content_y, content_w, content_h, 0x1E293B)
 
             paint_section_label(canvas, ui_font, "PREFERENCES", 16, prefs_label_y, 428)
             notify_cb.paint(canvas, ncx, ncy, nch, nch)

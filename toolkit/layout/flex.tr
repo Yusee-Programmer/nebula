@@ -320,14 +320,32 @@ pub def place(box: LayoutBox, x: int, y: int) -> void:
         k = k + 1
 
 pub def layout_tree(node: Pointer[UiNode], cache: StyleCache, vw: int, vh: int) -> LayoutBox:
+    return layout_tree_at(node, cache, 0, 0, vw, vh)
+
+# The same pipeline, but into a SUB-RECTANGLE of the canvas rather than the
+# whole of it.
+#
+# This is the entire fix for a limitation that has shaped every widget demo in
+# the repo: layout_tree always sized its root to the full canvas, so a second
+# render call repainted the whole surface and erased the chrome already drawn.
+# Both examples/widgets_demo and examples/uefi_demo/render_widgets.tr work
+# around it by host-painting their tab content with raw primitives rather than
+# writing it as markup.
+#
+# It needs no new machinery: place() has always taken an origin, and
+# layout_tree simply passed (0, 0). Sizing the root to the sub-rect and
+# placing it there gives boxes with correct ABSOLUTE coordinates -- which
+# matters because hit-testing walks this same tree, so shifting the painted
+# output afterwards instead would have left dispatch() testing the wrong space.
+pub def layout_tree_at(node: Pointer[UiNode], cache: StyleCache, x: int, y: int, vw: int, vh: int) -> LayoutBox:
     mut root = build(node, cache, 0)
     measure(root)
-    # The root fills the viewport unless it asked for a specific size.
+    # The root fills the given box unless it asked for a specific size.
     if root.style.w < 0:
         root.w = vw
     if root.style.h < 0:
         root.h = vh
-    place(root, 0, 0)
+    place(root, x, y)
     return root
 
 pub def dump_layout(box: LayoutBox, indent: int) -> void:

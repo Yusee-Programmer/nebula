@@ -1,0 +1,337 @@
+NEBULA -- confirmed Tauraro compiler/SDK/runtime defects
+========================================================
+
+The running log of Tauraro bugs hit while building Nebula, each reduced to a
+minimal repro. Check here before spending time re-diagnosing a hang, a link
+error naming a symbol you never wrote, or a value that is silently zero.
+
+CLAUDE.md refers to a `tau_bugs.txt` from earlier sessions; that file is not
+in the repo (it appears never to have been committed). This file replaces it.
+Entries below numbered from 1; older entries referenced by number in CLAUDE.md
+belong to the lost file and are NOT the same numbers.
+
+Compiler: tauraroc, Windows SDK at %USERPROFILE%\.taupkg\bin\tauraroc-windows-x64
+Recorded: 2026-09-06
+
+
+--------------------------------------------------------------------------
+#1  Module-level `mut` initializers DO NOT RUN on freestanding targets
+--------------------------------------------------------------------------
+SEVERITY  High -- silent wrong values, no crash, no diagnostic.
+TARGETS   Any --freestanding build entered through `pub export def` rather
+          than @entry/main. Confirmed on wasm32-freestanding; the same
+          symptom was observed on x86_64-uefi.
+STATUS    Open. Worked around in every Nebula freestanding entry point.
+
+REPRO
+  mut plain_int: int   = 42
+  mut computed:  int   = 6 * 7
+  mut flag:      bool  = true
+  mut small:     usize = 99 as usize
+
+  pub export def get_plain_int() -> int:  return plain_int
+  pub export def get_computed()  -> int:  return computed
+  pub export def get_flag()      -> bool: return flag
+  pub export def get_small()     -> usize: return small
+
+  tauraroc probe.tr --target wasm --freestanding --emit c
+  zig build-exe -target wasm32-freestanding -fno-entry -rdynamic \
+      -O ReleaseSmall -femit-bin=probe.wasm -cflags -w -- build/main.c
+
+  (needs @allocator/@free/@realloc/@calloc hooks present, or the C compile
+  stops earlier with "TAURARO_KERNEL requires TAURARO_ALLOC/... defined")
+
+OBSERVED
+  get_plain_int() -> 0     (expected 42)
+  get_computed()  -> 0     (expected 42)
+  get_flag()      -> 0     (expected true)
+  get_small()     -> 0     (expected 99)
+
+CAUSE
+  Global initialization is emitted into a module-init routine that only runs
+  from main/_start. A freestanding entry point is called directly by its host
+  (a zig UEFI stub, a JS host page), so that routine never runs and every
+  global keeps its zeroed BSS value.
+
+WHY IT IS NASTY
+  Two distinct failure modes, and the second is much harder to spot:
+    a) `mut x: SomeClass = SomeClass.init()` is permanently NULL. Fails later
+       as "member access within null pointer of type 'UiParser'", far from
+       the declaration.
+    b) A SCALAR with a non-zero default is silently zero. Nothing crashes.
+       A slider that declared `= 40` rendered at 0 across several verified
+       screenshots before anyone noticed.
+
+WORKAROUND
+  Treat every freestanding global as zero-initialized regardless of its
+  declaration. Assign non-zero defaults inside a function the host calls
+  (a first-frame guard). See examples/web_demo/render_web.tr:reset_defaults.
+
+
+--------------------------------------------------------------------------
+#2  A >4KB stack frame fails to link on uefi-x64: undefined __chkstk
+--------------------------------------------------------------------------
+SEVERITY  Medium -- clear link error, but names a symbol absent from source
+          and only on one target.
+TARGETS   --target uefi-x64. Not hosted, not Cortex-M, not wasm.
+STATUS    Open (arguably a target gap, not a codegen bug). Worked around.
+
+REPRO
+  One function with enough locals to cross a 4KB frame -- e.g. a long
+  if/elif chain where each branch declares its own `mut`. Nebula's original
+  toolkit/ui/style.tr:apply_utility had ~40 such branches.
+
+OBSERVED
+  lld-link: undefined symbol: __chkstk
+    note: referenced by module_toolkit_ui_style.c  (apply_utility)
+
+CAUSE
+  __chkstk is the Microsoft x64 ABI's stack-probe helper, emitted for any
+  frame larger than one 4KB page so the guard page is touched in order. UEFI
+  shares that ABI (it is PE/COFF -- the same reason zig predefines _WIN32
+  there) but is freestanding, so nothing supplies the helper.
+
+WHY IT IS NASTY
+  The trigger is TOTAL LOCALS IN ONE FUNCTION -- not recursion, not
+  allocation -- so it accumulates silently as a function grows branches, and
+  it is invisible on every other target.
+
+WORKAROUND
+  Split the function so no frame exceeds a page. Nebula split apply_utility
+  into five per-family helpers. A real fix would be for the uefi-x64 target
+  to provide __chkstk (~10 instructions) or compile with
+  -mno-stack-arg-probe.
+
+
+--------------------------------------------------------------------------
+#3  Allocator hook names leak into tauraro_rt.h as macros and collide
+--------------------------------------------------------------------------
+SEVERITY  Medium -- confusing error naming a runtime type the user never
+          referenced.
+TARGETS   Any --freestanding build.
+STATUS    Open. Trivially avoidable once known.
+
+REPRO
+  @calloc
+  def c(n: usize, sz: usize) -> Pointer[u8]:
+      return some_alloc(n * sz)
+
+OBSERVED
+  build/tauraro_rt.h:1494:28: error: called object type '_TrChan *' is not a
+  function or function pointer
+      _TrChan* c = (_TrChan*)TAURARO_CALLOC(1, sizeof(_TrChan));
+  note: expanded from macro 'TAURARO_CALLOC'
+  #define TAURARO_CALLOC(n,sz) c(n,sz)
+
+CAUSE
+  Each hook becomes a bare textual macro (`#define TAURARO_CALLOC(n,sz)
+  c(n,sz)`) that is then expanded INSIDE tauraro_rt.h, where the runtime has
+  its own locals. A one-letter hook name shadows them.
+
+WORKAROUND
+  Give hooks distinctive names (`nebula_calloc`, `arena_calloc`). A real fix
+  would emit the hook call through a uniquely-prefixed symbol rather than the
+  user's chosen identifier.
+
+
+--------------------------------------------------------------------------
+#4  `--target wasm` alone cannot compile: tauraro_rt.h includes <stdio.h>
+--------------------------------------------------------------------------
+SEVERITY  Low -- clear error, but the fix is non-obvious from the message.
+TARGETS   --target wasm without --freestanding.
+STATUS    Open / arguably by design, but undocumented.
+
+REPRO
+  tauraroc probe.tr --target wasm -o probe
+
+OBSERVED
+  build/tauraro_rt.h:91:12: fatal error: 'stdio.h' file not found
+
+CAUSE
+  Bare wasm32-freestanding has no libc. tauraro_rt.h only skips the hosted
+  headers when TAURARO_KERNEL is defined, and only --freestanding defines it.
+
+WORKAROUND
+  Always pair: `--target wasm --freestanding`. The cost is that the program
+  must supply its own @allocator/@free/@realloc/@calloc.
+  (`--target wasm-wasi` compiles as-is, because wasi-libc provides stdio --
+  but it then imports wasi_snapshot_preview1, which a browser does not have.)
+
+
+--------------------------------------------------------------------------
+#5  `pub export def` is not exported from wasm without -rdynamic
+--------------------------------------------------------------------------
+SEVERITY  Medium -- no error at all; the symbol is simply absent at runtime.
+TARGETS   wasm (both freestanding and wasi), when linking via zig build-exe.
+STATUS    Open. Toolchain behavior; worth documenting because the failure is
+          silent at build time.
+
+REPRO
+  pub export def add(a: int, b: int) -> int:
+      return a + b
+
+  ... link without -rdynamic ...
+
+OBSERVED
+  WebAssembly.Module.exports(mod) -> only [memory, _start]
+  Calling instance.exports.add(...) -> TypeError: not a function
+
+CAUSE
+  wasm-ld drops unreferenced symbols. `pub export def` marks a symbol
+  visible, but nothing references it inside the module, so it is stripped.
+
+WORKAROUND
+  Pass -rdynamic to zig build-exe (or an explicit --export=name per symbol).
+  Nebula's scripts/build-web.ps1 and cli/ do this.
+
+
+--------------------------------------------------------------------------
+NOT BUGS -- language rules worth knowing (they cost time anyway)
+--------------------------------------------------------------------------
+
+* [L-1] Returning a module-level Pointer from a function is rejected: the
+  compiler cannot prove the lifetime. Wrap in `unsafe:` or return the address
+  as a `usize` instead. Nebula's nebula_init returns a byte offset for this
+  reason (which JS wants anyway).
+
+* WASM ABI: Tauraro `int` AND `usize` are both i64, so they arrive in JS as
+  BigInt -- even on wasm32, where a pointer-sized type being 64-bit is
+  surprising. Only `Pointer[T]` comes across as a plain i32 Number. Mixing
+  them up gives "Cannot convert a BigInt value to a number", or worse,
+  silently wrong offsets.
+
+* Assigning a local into a field MOVES it ([M-1]); upcasting to an
+  interface-typed variable also moves. Passing a concrete instance directly
+  into a free function's interface parameter does not. This is why
+  toolkit/ui/interp.tr has free-function wrappers (render_to,
+  register_handler) rather than methods.
+
+* `match` on an enum wants an explicit `case _:` even when every variant is
+  listed, or the return-path checker ([F-3]) reports a missing return.
+
+
+--------------------------------------------------------------------------
+#6  `OS.args()` does not compile -- emits a call to a function that does
+    not exist
+--------------------------------------------------------------------------
+SEVERITY  High -- the documented way to read argv is unusable, and it is the
+          first thing any CLI reaches for.
+TARGETS   All. Confirmed hosted (windows-x64).
+STATUS    Open. Workaround below is solid.
+
+REPRO
+  from sys.os import OS
+  def main():
+      mut a = OS.args()
+      print("argc = " + len(a).to_str())
+
+  tauraroc probe.tr --run
+
+OBSERVED
+  build/main.c:9:21: error: call to undeclared function 'OS_args'
+  build/main.c:11:89: error: member reference type 'int' is not a pointer
+
+CAUSE
+  `OS.args()` lowers to a bare `OS_args()` call that nothing declares or
+  defines -- the runtime has no such symbol. The follow-on error is the
+  compiler then treating the implicit-int result as if it were a collection.
+
+RELATED, AND WORSE
+  Naming the receiving local `argv` inside `main()` adds a THIRD error:
+      build/main.c:780:17: error: redefinition of 'argv'
+  because the generated C main is `int main(int argc, char** argv)` and the
+  user's local lands in the same scope. Any local named `argc`/`argv` in
+  `main()` collides, regardless of OS.args().
+
+WORKAROUND
+  Declare the runtime primitives directly. These work correctly:
+
+      extern "C":
+          def _tr_get_argc() -> int
+          def _tr_get_arg(n: int) -> str
+
+  Verified: argc and every argv[i] come back correct, including argv[0] as
+  the full exe path. This is what cli/nebula.tr uses.
+
+
+--------------------------------------------------------------------------
+#7  `Env.init()` crashes with heap corruption (0xC0000374)
+--------------------------------------------------------------------------
+SEVERITY  High -- the other documented argv path, and it takes the process
+          down with no message.
+TARGETS   Hosted windows-x64, compiled to .exe.
+STATUS    Open, NOT root-caused. Avoid the class; use #6's workaround.
+
+REPRO
+  from sys.env import Env
+  def main():
+      print("A: before init")
+      mut e = Env.init()
+      print("B: count = " + e.get_arg_count().to_str())
+
+  tauraroc probe.tr -o probe.exe   &&   .\probe.exe
+
+OBSERVED
+  No output at all (stdout is block-buffered and lost), process exits
+  -1073740940 == 0xC0000374 == STATUS_HEAP_CORRUPTION.
+
+NARROWED, BUT NOT SOLVED
+  Ruled out, each verified working in isolation:
+    * the four primitives Env.init() wraps -- _tr_get_argc, _tr_get_arg,
+      _tr_exe_dir, _tr_cwd -- all return correct values;
+    * `Vec[str].init(n)` plus `push()`/`get()`;
+    * the use-after-move pattern in Env.init() (pushing a local `str` into a
+      Vec and then concatenating with that same local afterwards) -- this
+      does NOT corrupt anything on its own.
+  So the fault is somewhere in the composition rather than any one part.
+  Chasing it further needs a debug build or ASAN (`--debug`), which was not
+  worth it once #6's workaround was confirmed.
+
+WORKAROUND
+  Do not construct Env. Use the raw externs from #6.
+
+
+--------------------------------------------------------------------------
+#8  `\` in a string literal produces NOTHING instead of a backslash
+--------------------------------------------------------------------------
+SEVERITY  High -- silently wrong strings, no diagnostic. Makes Windows paths
+          impossible to write as literals.
+TARGETS   All. Confirmed hosted (windows-x64), `--run` and compiled.
+STATUS    Open. Worked around by using forward slashes everywhere.
+
+REPRO
+  def main():
+      print("1: [" + "a\b" + "]")
+      print("2: [" + "C:\Users\Home" + "]")
+      print("3: [" + "quote:\"q\"" + "]")
+      print("4: [" + "tab:\there" + "]")
+      print("5: len of a\b = " + "a\b".len().to_str())
+
+OBSERVED                                 EXPECTED
+  1: [ab]                                  1: [a\b]
+  2: [C:UsersHome]                         2: [C:\Users\Home]
+  3: [quote:"q"]            <- correct     3: [quote:"q"]
+  4: [tab:<TAB>here]        <- correct     4: [tab:<TAB>here]
+  5: len of ab = 2                         5: len of a\b = 3
+
+CAUSE
+  The literal scanner handles `\"` and `\t` but consumes `\` and emits no
+  character at all -- not the backslash, not the two source characters. The
+  length check rules out a display artifact: the backslash is genuinely
+  absent from the string.
+
+WHY IT IS NASTY
+  Nothing warns. A path built this way is subtly wrong and only fails much
+  later, wherever it is finally used. This showed up as
+
+      'C:\Users\HomePC.taupkgbin' is not recognized as an internal or
+      external command
+
+  from a CLI whose source clearly read "\.taupkg\bin\\" -- the error names
+  a path that appears nowhere in the source.
+
+WORKAROUND
+  Use forward slashes. Windows APIs, cmd.exe and PowerShell all accept them
+  in paths. cli/nebula.tr builds every path this way for this reason.
+  If a literal backslash is genuinely required, it cannot currently be
+  written as a string literal at all.

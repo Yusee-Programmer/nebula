@@ -1,0 +1,452 @@
+# cli.nebula — the `nebula` command.
+#
+#   nebula init <name>        scaffold a project
+#   nebula build --<target>   generate + compile
+#   nebula run   --<target>   build, then launch
+#   nebula targets            list platforms
+#
+# Written in Tauraro, which was not a foregone conclusion: it needed the
+# stdlib to be able to walk directories and spawn processes, and the plan
+# (proposal v3, open question 1) said to settle that with a probe before
+# designing anything. It can -- `io.dir.Dir.list()` and
+# `sys.process.Process.system/shell_output` all work -- so this is one binary
+# rather than a Tauraro core wrapped in a shell script.
+#
+# What it replaces: four PowerShell scripts, their accumulated flag folklore
+# (`-nostartfiles`, `-fno-sanitize=undefined`, `-U_WIN32`, `-rdynamic`,
+# `--freestanding`), and five hand-written `main.tr` files that between them
+# carried four verbatim copies of the same bump allocator.
+
+from io.file import File
+from io.dir import Dir
+from sys.process import Process
+from sys.os import OS
+
+# argv, via the runtime primitives rather than OS.args() or Env.
+#
+# Both documented APIs are broken: OS.args() emits a call to a symbol the
+# runtime does not define, and Env.init() exits with heap corruption. These
+# two externs are what actually works. See bugs.txt #6 and #7.
+extern "C":
+    def _tr_get_argc() -> int
+    def _tr_get_arg(n: int) -> str
+from string.str import Str
+from cli.config import Config, load_config, target_from_name, target_name
+from cli.config import target_hosted, target_desktop, target_web, target_uefi, target_bare
+from cli.config import target_unknown, all_target_names, is_freestanding
+from cli.codegen import generate
+
+def usage() -> void:
+    print("nebula -- a cross-platform GUI engine")
+    print("")
+    print("  nebula init <name>         scaffold a new project")
+    print("  nebula build --<target>    generate the entry point and compile")
+    print("  nebula run   --<target>    build, then launch it")
+    print("  nebula targets             list the platforms")
+    print("")
+    print("targets: " + all_target_names())
+    print("")
+    print("  nebula init my-app")
+    print("  cd my-app")
+    print("  nebula run --desktop")
+
+# The SDK lives under the user's profile; every tool the CLI shells out to is
+# found relative to it rather than trusted to be on PATH, because a shell
+# started before the SDK was installed will not have it.
+def sdk_root() -> str:
+    return Process.shell_output("echo %USERPROFILE%")
+
+def tool(name: str) -> str:
+    mut home = Str.trim(sdk_root())
+    # Forward slashes on purpose: a literal backslash cannot currently be
+    # written in a Tauraro string at all -- `\` produces nothing (bugs.txt #8).
+    # Windows accepts forward slashes in paths everywhere this matters.
+    return "\"" + home + "/.taupkg/bin/tauraroc-windows-x64/" + name + "\""
+
+def say(s: str) -> void:
+    print(s)
+
+def fail(s: str) -> void:
+    print("error: " + s)
+
+# --- init ------------------------------------------------------------------
+
+def scaffold_conf(name: str) -> str:
+    mut s = "# nebula.conf -- one key = value per line, # for comments.\n"
+    s = s + "name    = " + name + "\n"
+    s = s + "width   = 900\n"
+    s = s + "height  = 560\n"
+    s = s + "entry   = app/page.ui\n"
+    s = s + "handlers = app/page.tr\n"
+    s = s + "bg      = #0F172A\n"
+    return s
+
+def scaffold_page_ui() -> str:
+    mut s = "# The UI is data. Edit this file and re-run -- on hosted and desktop it is\n"
+    s = s + "# read at runtime, so no rebuild is needed. Class strings are Tailwind:\n"
+    s = s + "# numbers are scale steps, so p-6 is 24px, not 6px.\n\n"
+    s = s + "<panel \"flex-col p-6 gap-4 bg-slate-900 items-center justify-center\">\n"
+    s = s + "  <panel \"w-1/2 flex-col p-5 gap-4 bg-slate-800 rounded-2xl border border-slate-600\">\n"
+    s = s + "    <text \"text-slate-100\">HELLO FROM NEBULA</text>\n"
+    s = s + "    <panel \"h-24 bg-indigo-500 rounded-xl\" />\n"
+    s = s + "    <panel \"flex-row gap-4 h-12\">\n"
+    s = s + "      <button \"grow bg-sky-500 rounded-lg justify-center items-center\" @on_click(on_ok)>\n"
+    s = s + "        <text \"text-white\">OK</text>\n"
+    s = s + "      </button>\n"
+    s = s + "      <button \"grow bg-slate-600 rounded-lg border border-slate-400 justify-center items-center\" @on_click(on_cancel)>\n"
+    s = s + "        <text \"text-slate-100\">CANCEL</text>\n"
+    s = s + "      </button>\n"
+    s = s + "    </panel>\n"
+    s = s + "  </panel>\n"
+    s = s + "</panel>\n"
+    return s
+
+def scaffold_page_tr() -> str:
+    mut s = "# Handlers for app/page.ui.\n"
+    s = s + "#\n"
+    s = s + "# The contract is one function: `register_all(it)`. Nebula never scans this\n"
+    s = s + "# file for handler names -- a convention the compiler checks beats a regex\n"
+    s = s + "# that guesses -- so anything you want reachable from markup has to be\n"
+    s = s + "# registered here.\n"
+    s = s + "#\n"
+    s = s + "# A handler is a class implementing EventHandler rather than a function,\n"
+    s = s + "# which also gives it somewhere to keep state.\n\n"
+    s = s + "from toolkit.types import Event, EventHandler\n"
+    s = s + "from toolkit.ui.interp import Interpreter, register_handler\n\n"
+    s = s + "pub class Say implements EventHandler:\n"
+    s = s + "    pub label: str\n\n"
+    s = s + "extend Say:\n"
+    s = s + "    pub def init(label: str) -> Say:\n"
+    s = s + "        mut h = Say()\n"
+    s = s + "        h.label = label\n"
+    s = s + "        return h\n\n"
+    s = s + "    pub def handle(self, e: Event) -> void:\n"
+    s = s + "        print(\"[handler] \" + self.label + \" at (\" + e.x.to_str() + \",\" + e.y.to_str() + \")\")\n\n"
+    s = s + "pub def register_all(it: Interpreter) -> void:\n"
+    s = s + "    register_handler(it, \"on_ok\", Say.init(\"OK\"))\n"
+    s = s + "    register_handler(it, \"on_cancel\", Say.init(\"CANCEL\"))\n"
+    return s
+
+def cmd_init(name: str) -> int:
+    if name == "":
+        fail("usage: nebula init <name>")
+        return 1
+
+    mut root = Dir.init(name)
+    if root.exists():
+        fail("'" + name + "' already exists here")
+        return 1
+    root.make()
+    mut app = Dir.init(name + "/app")
+    app.make()
+
+    File.write_text(name + "/nebula.conf", scaffold_conf(name))
+    File.write_text(name + "/app/page.ui", scaffold_page_ui())
+    File.write_text(name + "/app/page.tr", scaffold_page_tr())
+
+    say("created " + name + "/")
+    say("  nebula.conf")
+    say("  app/page.ui      the UI, as data")
+    say("  app/page.tr      handlers, via register_all(it)")
+    say("")
+    say("next:")
+    say("  cd " + name)
+    say("  nebula run --hosted     # fastest loop, writes a PPM")
+    say("  nebula run --desktop    # a real window")
+    say("  nebula run --web        # a browser tab")
+    return 0
+
+# --- build -----------------------------------------------------------------
+
+# Writes the generated entry point and returns its path, or "" on failure.
+def emit_entry(cfg: Config, target: int) -> str:
+    mut out = Dir.init(".nebula")
+    if not out.exists():
+        out.make()
+
+    mut markup = ""
+    if is_freestanding(target):
+        # No filesystem on these tiers, so the markup is baked in at build
+        # time rather than read at runtime.
+        markup = File.read_text(cfg.entry)
+        if markup == "":
+            fail("cannot read " + cfg.entry)
+            return ""
+
+    mut has_handlers = false
+    if cfg.handlers != "":
+        if File.read_text(cfg.handlers) != "":
+            has_handlers = true
+
+    mut src = generate(cfg, target, markup, has_handlers)
+    if src == "":
+        fail("no generator for target " + target_name(target))
+        return ""
+
+    mut path = ".nebula/main.tr"
+    File.write_text(path, src)
+    return path
+
+# tauraroc always emits its C into ./build, and REUSES whatever is there. A
+# previous build of a different program leaves modules behind that the next
+# one happily compiles and links -- which surfaces either as errors naming
+# types the current program never mentions, or, worse, as a binary that
+# silently runs the PREVIOUS program. Both happened while building this CLI.
+# Dir.remove() will not do it: it does not recurse.
+# Collects every emitted .c, RECURSIVELY. tauraroc puts most modules at the
+# top of build/ but drops std sources under build/include/... -- exactly one
+# file in a typical build, which is enough to fail the link with a pile of
+# undefined StringBuilder_* symbols if the walk is not recursive.
+def collect_c(dir: str, acc: str) -> str:
+    mut d = Dir.init(dir)
+    if not d.exists():
+        return acc
+    mut out = acc
+    mut e = d.list()
+    mut i = 0
+    while i < len(e):
+        mut nm = e[i]
+        mut path = dir + "/" + nm
+        mut n = Str.len(nm)
+        if n > 2 and Str.slice(nm, n - 2, n) == ".c":
+            out = out + " " + path
+        else:
+            out = collect_c(path, out)
+        i = i + 1
+    return out
+
+def clean_build_dir() -> void:
+    Process.system("powershell -NoProfile -Command \"Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue\"")
+
+# Wraps a forward-slash exe path so PowerShell will launch it.
+def launch(path: str) -> str:
+    return "powershell -NoProfile -Command \"& '" + path + "'\""
+
+def run_cmd(label: str, cmd: str) -> bool:
+    mut rc = Process.system(cmd)
+    if rc != 0:
+        fail(label + " failed (exit " + rc.to_str() + ")")
+        return false
+    return true
+
+# Hosted and desktop compile straight to a native exe. Desktop additionally
+# needs SDL2 linked by path: `-lSDL2` fails with "searched paths: none",
+# because tauraroc's -l resolution does not look in the working directory.
+def build_native(cfg: Config, target: int, entry: str) -> bool:
+    clean_build_dir()
+    mut exe = ".nebula/" + cfg.name + ".exe"
+    mut cmd = tool("tauraroc.exe") + " " + entry + " -o " + exe
+    if target == target_desktop():
+        # SDL2 is not vendored: the .dll is gitignored upstream and the .lib
+        # is derived from it. Checked here rather than left to the linker,
+        # whose "SDL2.lib: file not found" says nothing about what to do.
+        # `--link <path>` and not `-lSDL2`: tauraroc's -l resolution does not
+        # search the working directory and fails with "searched paths: none".
+        if File.read_text("SDL2.lib") == "":
+            fail("SDL2.lib not found in this directory.")
+            say("  The desktop backend links SDL2, which is not vendored with Nebula.")
+            say("  Copy SDL2.lib and SDL2.dll next to nebula.conf, then retry.")
+            say("  (Generate SDL2.lib from an official SDL2.dll with dumpbin + lib,")
+            say("   or take the pair from the Nebula repo root.)")
+            return false
+        cmd = cmd + " --link SDL2.lib"
+    return run_cmd("tauraroc", cmd)
+
+# Freestanding wasm, then zig links it. Both flags below are load-bearing and
+# silent when missing: without --freestanding the C compile fails on stdio.h,
+# and without -rdynamic every export is stripped and the host page fails at
+# the first call with "not a function".
+def build_web(cfg: Config, entry: str) -> bool:
+    clean_build_dir()
+    if not run_cmd("tauraroc", tool("tauraroc.exe") + " " + entry + " --target wasm --freestanding --emit c"):
+        return false
+
+    mut files = collect_c("build", "")
+    if files == "":
+        fail("tauraroc emitted no C sources")
+        return false
+
+    mut cmd = tool("zig/zig.exe") + " build-exe -target wasm32-freestanding -fno-entry -rdynamic"
+    cmd = cmd + " -O ReleaseSmall --export=__heap_base --initial-memory=67108864"
+    cmd = cmd + " --name nebula -femit-bin=.nebula/nebula.wasm"
+    cmd = cmd + " -cflags -w -fno-sanitize=undefined --" + files
+    return run_cmd("zig", cmd)
+
+# The host page. Written out beside the .wasm so `nebula run --web` produces
+# something a browser can open with no other files and no bundler.
+#
+# The ABI is the whole reason this is generated rather than hand-written: get
+# one BigInt/Number boundary wrong and the failure is silent or nonsensical.
+# Tauraro `int` and `usize` are BOTH i64 in the wasm ABI -- so they arrive in
+# JS as BigInt, even on wasm32 -- while `Pointer[T]` is i32, a plain Number.
+def host_page(cfg: Config) -> str:
+    mut w = cfg.width.to_str()
+    mut h = cfg.height.to_str()
+    mut s = "<!doctype html>\n<meta charset=\"utf-8\">\n"
+    s = s + "<title>" + cfg.name + "</title>\n"
+    s = s + "<style>\n"
+    s = s + "  body { margin:0; min-height:100vh; display:grid; place-items:center;\n"
+    s = s + "         background:#020617; color:#94a3b8;\n"
+    s = s + "         font:13px ui-monospace,SFMono-Regular,Menlo,monospace; }\n"
+    s = s + "  canvas { border-radius:12px; box-shadow:0 24px 60px #0008; cursor:none; }\n"
+    s = s + "  #hud { margin-top:12px; opacity:.75 }\n"
+    s = s + "</style>\n"
+    s = s + "<canvas id=\"c\" width=\"" + w + "\" height=\"" + h + "\"></canvas>\n"
+    s = s + "<div id=\"hud\">loading...</div>\n"
+    s = s + "<script type=\"module\">\n"
+    s = s + "const W = " + w + ", H = " + h + ";\n"
+    s = s + "const cv = document.getElementById('c'), ctx = cv.getContext('2d');\n"
+    s = s + "const hud = document.getElementById('hud');\n\n"
+    # Empty import object: the module is freestanding, so it imports nothing.
+    s = s + "const { instance } = await WebAssembly.instantiateStreaming(fetch('nebula.wasm'), {});\n"
+    s = s + "const ex = instance.exports;\n\n"
+    s = s + "// __heap_base is where static data ends; everything above it is ours.\n"
+    s = s + "const heapBase = ex.__heap_base.value ?? ex.__heap_base;\n"
+    s = s + "const total = ex.memory.buffer.byteLength;\n"
+    s = s + "ex.nebula_heap_init(heapBase, BigInt(total - heapBase));\n\n"
+    s = s + "// Pointer[T] is i32 (a Number); int and usize are i64 (BigInt).\n"
+    s = s + "const pixelPtr = Number(ex.nebula_init(BigInt(W), BigInt(H)));\n\n"
+    s = s + "let image = null;\n"
+    s = s + "function refreshView() {\n"
+    s = s + "  const view = new Uint8ClampedArray(ex.memory.buffer, pixelPtr, W * H * 4);\n"
+    s = s + "  image = new ImageData(view, W, H);\n"
+    s = s + "}\n"
+    s = s + "refreshView();\n\n"
+    s = s + "let mx = 0, my = 0, buttons = 0, key = 0;\n"
+    s = s + "cv.addEventListener('mousemove', e => {\n"
+    s = s + "  const r = cv.getBoundingClientRect();\n"
+    s = s + "  mx = Math.round((e.clientX - r.left) * W / r.width);\n"
+    s = s + "  my = Math.round((e.clientY - r.top) * H / r.height);\n"
+    s = s + "});\n"
+    s = s + "cv.addEventListener('mousedown', () => { buttons = 1; });\n"
+    s = s + "window.addEventListener('mouseup', () => { buttons = 0; });\n"
+    s = s + "window.addEventListener('keydown', e => { key = e.keyCode || 0; });\n\n"
+    s = s + "function frame() {\n"
+    s = s + "  ex.nebula_frame(BigInt(W), BigInt(H), BigInt(mx), BigInt(my), BigInt(buttons), BigInt(key));\n"
+    s = s + "  key = 0;\n"
+    # A grown memory detaches the old ArrayBuffer, which silently makes the
+    # ImageData view unusable. Cheap to check, maddening to debug otherwise.
+    s = s + "  if (image.data.buffer !== ex.memory.buffer) refreshView();\n"
+    s = s + "  ctx.putImageData(image, 0, 0);\n"
+    s = s + "  hud.textContent = ex.nebula_frames() + ' frames - arena ' + ex.nebula_arena_used() + ' bytes';\n"
+    s = s + "  requestAnimationFrame(frame);\n"
+    s = s + "}\n"
+    s = s + "requestAnimationFrame(frame);\n"
+    s = s + "</script>\n"
+    return s
+
+# --- build / run dispatch --------------------------------------------------
+
+def do_build(cfg: Config, target: int) -> bool:
+    say("building " + cfg.name + " for " + target_name(target) + "...")
+    mut entry = emit_entry(cfg, target)
+    if entry == "":
+        return false
+    say("  generated " + entry)
+
+    if target == target_hosted():
+        return build_native(cfg, target, entry)
+    if target == target_desktop():
+        return build_native(cfg, target, entry)
+    if target == target_web():
+        if not build_web(cfg, entry):
+            return false
+        File.write_text(".nebula/index.html", host_page(cfg))
+        say("  wrote .nebula/index.html")
+        return true
+    # UEFI and bare metal still go through the PowerShell scripts: both need a
+    # linker script, a zig stub, or a qemu invocation whose flag folklore is
+    # already encoded there and not yet worth re-deriving here. The generated
+    # entry point above is the part that mattered; absorbing the scripts is
+    # tracked as the remainder of phase 3.
+    if target == target_uefi():
+        return run_cmd("build-uefi", "powershell -NoProfile -File scripts/build-uefi.ps1 -Source " + entry + " -Stub examples/uefi_demo/boot_interactive.zig -OutDir .nebula/uefi")
+    if target == target_bare():
+        return run_cmd("build-bare", "powershell -NoProfile -File scripts/build-bare.ps1 -Source " + entry)
+    return false
+
+def do_run(cfg: Config, target: int) -> bool:
+    if not do_build(cfg, target):
+        return false
+
+    # Launched through PowerShell, not directly: cmd.exe reads a leading `/`
+    # as a switch, and a literal backslash cannot be written in a Tauraro
+    # string at all (bugs.txt #8), so a forward-slash path is the only one
+    # this program can construct -- and PowerShell accepts it.
+    if target == target_hosted():
+        return run_cmd("run", launch(".nebula/" + cfg.name + ".exe"))
+    if target == target_desktop():
+        # SDL2.dll has to sit beside the exe, and it is gitignored, so copy
+        # whatever the repo root has rather than making the user do it.
+        Process.system("powershell -NoProfile -Command \"Copy-Item SDL2.dll .nebula/ -Force -ErrorAction SilentlyContinue\"")
+        return run_cmd("run", launch(".nebula/" + cfg.name + ".exe"))
+    if target == target_web():
+        say("")
+        say("serve it (the page fetches the .wasm, so file:// will not work):")
+        say("  cd .nebula && python -m http.server 8000")
+        say("then open http://localhost:8000/")
+        return true
+    if target == target_uefi():
+        return run_cmd("run-uefi", "powershell -NoProfile -File scripts/run-uefi.ps1 -OutDir .nebula/uefi -Build:$false")
+    if target == target_bare():
+        return run_cmd("run-bare", "powershell -NoProfile -File scripts/run-bare.ps1")
+    return false
+
+# --- entry point -----------------------------------------------------------
+
+# Accepts `--web`, `-web` or a bare `web`, because all three are things
+# people type and none of them is ambiguous.
+def parse_target(arg: str) -> int:
+    mut a = arg
+    while Str.starts_with(a, "-"):
+        a = Str.slice(a, 1, Str.len(a))
+    return target_from_name(a)
+
+def main():
+    mut nargs = _tr_get_argc()
+    if nargs < 2:
+        usage()
+        return
+
+    mut cmd = _tr_get_arg(1)
+
+    if cmd == "help" or cmd == "--help" or cmd == "-h":
+        usage()
+        return
+
+    if cmd == "targets":
+        say("targets: " + all_target_names())
+        return
+
+    if cmd == "init":
+        mut name = ""
+        if nargs > 2:
+            name = _tr_get_arg(2)
+        Process.exit(cmd_init(name))
+        return
+
+    if cmd == "build" or cmd == "run":
+        if nargs < 3:
+            fail("which target? one of: " + all_target_names())
+            return
+        mut targ = _tr_get_arg(2)
+        mut t = parse_target(targ)
+        if t == target_unknown():
+            fail("unknown target '" + targ + "' -- expected one of: " + all_target_names())
+            return
+        mut cfg = load_config("nebula.conf")
+        if not cfg.ok:
+            fail(cfg.err)
+            return
+        mut ok = false
+        if cmd == "build":
+            ok = do_build(cfg, t)
+        else:
+            ok = do_run(cfg, t)
+        if ok:
+            return
+        Process.exit(1)
+        return
+
+    fail("unknown command '" + cmd + "'")
+    usage()

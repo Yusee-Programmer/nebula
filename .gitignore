@@ -29,3 +29,13 @@ smoke_*
 # this only matches what the demos write out.
 *.ppm
 *.png
+
+# nebula CLI build output
+nebula.exe
+nebula.pdb
+.nebula/
+demo-app/
+
+# The Tauraro defect log is source, not build output -- the blanket *.txt
+# rule above would otherwise silently swallow it (it did, once).
+!bugs.txt

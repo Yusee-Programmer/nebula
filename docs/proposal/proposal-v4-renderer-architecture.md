@@ -138,6 +138,61 @@ SDL3, which is a dependency change, not a rendering change.
 
 ---
 
+---
+
+## 5a. Step A result — measured, 2026-09-07
+
+**Answer: "Modern Renderer" is a dependency change (SDL3), and it is not
+justified by performance on any target we have.**
+
+Evidence, from `bench_render.tr` (kept in the repo; rebuild and rerun to re-check):
+
+```
+renderer flags   : 10   -> accelerated: true, target texture: true
+max texture      : 8192x8192
+
+1600x1000, 60 frames, a card with 4 rounded panels, 2 buttons and 3 text runs:
+
+A  per-pixel SDL calls      : 4.57 ms/frame   (219 fps)
+B  RAM + streaming texture  : 8.08 ms/frame   (124 fps)
+C  rasterize only, no upload: 2.20 ms/frame
+```
+
+Four things follow, and two of them were surprises:
+
+1. **SDL_GPU is not available to us.** `toolkit/render/desktop/sdl_bindings.tr` has
+   838 bound symbols and **zero** `SDL_GPU*`: it is generated from SDL2 headers, and
+   SDL_GPU shipped in SDL3. Adopting it means a new DLL, regenerated bindings, and
+   an API migration (`SDL_Renderer` changed, `SDL_Rect` became `SDL_FRect`, the event
+   union changed) — a dependency project, not a rendering one.
+
+2. **We are already on the GPU.** The SDL2 renderer reports `ACCELERATED |
+   TARGETTEXTURE`. The `fill_rect` path has been hardware-accelerated all along.
+
+3. **The streaming texture is 1.8x SLOWER, not faster.** This was the expected
+   "modern" win and it is a loss: a full-frame upload is 1600·1000·4 = 6.4 MB across
+   PCIe every frame, whereas per-pixel draws only touch pixels actually painted —
+   and SDL2 batches those internally into vertex buffers (2.0.10+).
+
+4. **Rasterization is only 48% of the cost.** Path A splits roughly evenly between
+   the Tauraro rasterizer (2.20 ms) and SDL submission (2.37 ms). So even a perfect
+   GPU renderer — zero submission, AA in shaders — is bounded by removing ~4.5
+   ms/frame from something already running at 219 fps.
+
+**What this reorders.** The thing that would actually help is **diffing**: repaint
+only what changed, instead of re-rendering a static scene from scratch 60 times a
+second. That needs the scene graph (step C), costs no new dependency, and helps
+*every* tier — including UEFI and bare metal, which have no GPU to fall back on and
+where the frame cost is measured in hundreds of milliseconds, not single digits.
+
+A GPU renderer helps only the tiers that are already fast.
+
+**Recommendation:** move step H (Modern Renderer) out of the near-term plan and treat
+it as an opt-in upgrade to be revisited if a workload appears that the software path
+cannot serve — very large surfaces, real-time animation across a full screen, or a
+mobile target where power, not throughput, is the constraint. Nothing we have today
+qualifies.
+
 ## 6. The four new core features
 
 **Widget tree + state management.** The biggest gap, and the one that most limits
@@ -176,19 +231,21 @@ step shippable and leaving the repo green:
 
 | | Step | Risk | Unblocks |
 |---|---|---|---|
-| **A** | Probe SDL_GPU/SDL3 availability | none | decides whether §5 is a rendering change or a dependency change |
+| ~~A~~ | ~~Probe SDL_GPU/SDL3~~ ✅ **done** | none | answered: dependency change, and not justified — see §5a |
 | **B** | `Caps` flags, wired to existing backends | low | honest shadow/alpha handling; no behaviour change |
 | **C** | Scene graph + `execute_software()` | medium | every `Canvas` backend keeps working; diffing and sub-rect become possible |
 | **D** | Sub-rect rendering via the scene graph | low | deletes the host-paint-the-dynamic-part workaround class |
 | **E** | Grid layout | low | additive |
 | **F** | Node identity + state management | high | animation, real widgets in markup |
 | **G** | Animation + transitions | medium | needs F |
-| **H** | Modern Renderer (SDL_GPU / WebGPU) | high | needs A, B, C |
+| ~~H~~ | Modern Renderer (SDL_GPU / WebGPU) — **deferred**, see §5a | high | nothing we have needs it |
+| **I** | Diffing on the scene graph | medium | needs C. The measured win, and it helps every tier |
 
-**Recommended start: A → B → C → D.** That order gets the IR in place, keeps every
-tier green, and pays off immediately (D removes a workaround that currently infects
-every widget demo) without committing to the GPU work until A has told us what it
-actually involves.
+**Recommended start: ~~A~~ → C → D → I.** A is done and removed H from the near-term
+plan, so the IR and what it unlocks is now the whole point. That order gets the IR in
+place, keeps every tier green, and pays off immediately: D removes a workaround that
+currently infects every widget demo, and I is the only change measured to help the
+tiers that are actually slow.
 
 ---
 

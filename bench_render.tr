@@ -1,0 +1,168 @@
+# Step A probe: is "Modern Renderer" a rendering change or a dependency change?
+#
+# Measures the two paths available WITHOUT changing dependencies:
+#   A) the current SdlCanvas -- SDL_RenderDrawPoint per antialiased pixel
+#   B) a streaming texture -- rasterize into RAM, upload once, RenderCopy
+#
+# and reports which render driver SDL actually picked, which decides whether
+# we are already on the GPU for the fill_rect path.
+
+from toolkit.render.canvas import Canvas
+from toolkit.types import Event, red_of, green_of, blue_of
+from toolkit.ui.parser import UiParser
+from toolkit.ui.interp import Interpreter, render_to
+from toolkit.render.desktop.sdl_canvas import SdlCanvas, sdl_init_video, sdl_windowpos_undefined, sdl_window_shown, sdl_renderer_accelerated
+from toolkit.render.desktop.sdl_bindings import SDL_Renderer, SDL_Texture, SDL_RendererInfo, SDL_Rect, Uint32, Uint8, c_int
+from toolkit.render.desktop.sdl_bindings import SDL_CreateTexture, SDL_UpdateTexture, SDL_RenderCopy, SDL_DestroyTexture
+from toolkit.render.desktop.sdl_bindings import SDL_GetRendererInfo, SDL_GetTicks, SDL_RenderPresent, SDL_RenderClear
+from toolkit.render.desktop.sdl_bindings import SDL_SetRenderDrawColor
+from string.str import Str
+
+# SDL_PIXELFORMAT_ARGB8888 and SDL_TEXTUREACCESS_STREAMING are computed by
+# macros, so bindgen only picked up SDL_PIXELFORMAT_UNKNOWN. Both values are
+# fixed by SDL2's ABI.
+def fmt_argb8888() -> Uint32:
+    return 0x16362004 as Uint32
+
+def access_streaming() -> c_int:
+    return 1 as c_int
+
+# A Canvas that writes into plain RAM. This is the same shape the UEFI tier
+# already uses for its backbuffer, and the thing a streaming texture uploads.
+pub class RamCanvas implements Canvas:
+    pub px: Pointer[u32]
+    pub w:  int
+    pub h:  int
+
+extend RamCanvas:
+    pub def init(px: Pointer[u32], w: int, h: int) -> RamCanvas:
+        mut c = RamCanvas()
+        c.px = px
+        c.w = w
+        c.h = h
+        return c
+
+    pub def width(self) -> int:
+        return self.w
+
+    pub def height(self) -> int:
+        return self.h
+
+    pub def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> void:
+        mut x0 = x
+        mut y0 = y
+        mut x1 = x + w
+        mut y1 = y + h
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        unsafe:
+            mut yy = y0
+            while yy < y1:
+                mut row = yy * self.w
+                mut xx = x0
+                while xx < x1:
+                    self.px.offset(row + xx).write(color as u32)
+                    xx = xx + 1
+                yy = yy + 1
+
+    pub def set_pixel(self, x: int, y: int, color: int) -> void:
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        unsafe:
+            self.px.offset(y * self.w + x).write(color as u32)
+
+def ui_source() -> str:
+    return "<panel \"flex-row justify-center items-center bg-[#0F172A]\">\n  <panel \"w-1/2 flex-col p-5 gap-4 bg-slate-800 rounded-2xl border border-slate-600\">\n    <text \"text-slate-100\">RENDER PATH BENCHMARK</text>\n    <panel \"h-24 bg-indigo-500 rounded-xl\" />\n    <panel \"h-24 bg-emerald-500 rounded-xl\" />
+    <panel \"h-24 bg-amber-500 rounded-xl\" />
+    <panel \"h-24 bg-fuchsia-500 rounded-xl\" />
+    <text \"text-slate-300\">MORE TEXT TO RASTERIZE PER FRAME HERE</text>
+    <text \"text-slate-300\">AND ANOTHER LINE OF GLYPHS TO BLIT AGAIN</text>\n    <panel \"flex-row gap-4 h-12\">\n      <button \"grow bg-sky-500 rounded-lg justify-center items-center\">\n        <text \"text-white\">ONE</text>\n      </button>\n      <button \"grow bg-rose-500 rounded-lg justify-center items-center\">\n        <text \"text-white\">TWO</text>\n      </button>\n    </panel>\n  </panel>\n</panel>\n"
+
+def main():
+    mut W = 1600
+    mut H = 1000
+    mut FRAMES = 60
+
+    mut canvas = SdlCanvas.open("nebula render benchmark", W, H)
+    if not canvas.ok():
+        print("could not open a window -- SDL2.dll beside the exe?")
+        return
+
+    # SDL_RENDERER_ACCELERATED is 0x02. If this is set, the fill_rect path is
+    # ALREADY going through the GPU and only the per-pixel work is not --
+    # which would make "modern renderer" a question about how we submit work,
+    # not about which library we link.
+    unsafe:
+        mut info = alloc[SDL_RendererInfo](1)
+        SDL_GetRendererInfo(canvas.ren, info)
+        mut ri = info.read()
+        mut flags = ri.flags as int
+        print("renderer flags   : " + flags.to_str())
+        print("  accelerated    : " + ((flags / 2) % 2 == 1).to_str())
+        print("  target texture : " + ((flags / 8) % 2 == 1).to_str())
+        print("  max texture    : " + (ri.max_texture_width as int).to_str() + "x" + (ri.max_texture_height as int).to_str())
+
+    mut p = UiParser.init()
+    mut tree = p.parse(ui_source())
+    mut it = Interpreter.init()
+    it.root_bg = 0x0F172A
+
+    # --- path A: current SdlCanvas -- one SDL call per antialiased pixel ---
+    mut ta = 0
+    mut t0 = SDL_GetTicks() as int
+    mut i = 0
+    while i < FRAMES:
+        canvas.clear(0x0F172A)
+        render_to(it, tree, canvas)
+        canvas.present()
+        i = i + 1
+    ta = (SDL_GetTicks() as int) - t0
+
+    # --- path B: rasterize into RAM, upload once, blit ---------------------
+    mut tb = 0
+    unsafe:
+        mut buf = alloc[u32](W * H)
+        mut tex = SDL_CreateTexture(canvas.ren, fmt_argb8888(), access_streaming(), W as c_int, H as c_int)
+        mut ram = RamCanvas.init(buf, W, H)
+
+        mut t1 = SDL_GetTicks() as int
+        mut j = 0
+        while j < FRAMES:
+            render_to(it, tree, ram)
+            SDL_UpdateTexture(tex, 0 as Pointer[SDL_Rect], buf as Pointer[void], (W * 4) as c_int)
+            SDL_RenderClear(canvas.ren)
+            SDL_RenderCopy(canvas.ren, tex, 0 as Pointer[SDL_Rect], 0 as Pointer[SDL_Rect])
+            SDL_RenderPresent(canvas.ren)
+            j = j + 1
+        tb = (SDL_GetTicks() as int) - t1
+        SDL_DestroyTexture(tex)
+
+    # --- path C: rasterize into RAM and DO NOT upload ----------------------
+    # Isolates the Tauraro-side rasterizer from SDL submission entirely. If C
+    # is close to A and B, then neither submission path is the cost, and a GPU
+    # renderer would have to move the ANTIALIASING ITSELF into shaders to
+    # help -- a far bigger change than swapping how pixels are handed over.
+    mut tc = 0
+    unsafe:
+        mut buf2 = alloc[u32](W * H)
+        mut ram2 = RamCanvas.init(buf2, W, H)
+        mut t2 = SDL_GetTicks() as int
+        mut k = 0
+        while k < FRAMES:
+            render_to(it, tree, ram2)
+            k = k + 1
+        tc = (SDL_GetTicks() as int) - t2
+
+    print("")
+    print("A  per-pixel SDL calls      : " + ta.to_str() + " ms / " + FRAMES.to_str() + " frames = " + (ta / FRAMES).to_str() + " ms/frame")
+    print("B  RAM + streaming texture  : " + tb.to_str() + " ms / " + FRAMES.to_str() + " frames = " + (tb / FRAMES).to_str() + " ms/frame")
+    print("C  rasterize only, no upload: " + tc.to_str() + " ms / " + FRAMES.to_str() + " frames = " + (tc / FRAMES).to_str() + " ms/frame")
+    print("")
+    print("rasterization is " + ((tc * 100) / ta).to_str() + "% of path A's total time")
+    canvas.close()

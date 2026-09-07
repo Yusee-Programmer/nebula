@@ -29,7 +29,10 @@ extend OkHandler:
         return h
 
     pub def handle(self, e: Event) -> void:
+        
         print("  [host] " + self.label + " fired at (" + e.x.to_str() + "," + e.y.to_str() + ")")
+        if self.label == "on_cancel":
+            _tr_exit()
 
 pub class KeyHandler implements EventHandler:
     pub tag: int

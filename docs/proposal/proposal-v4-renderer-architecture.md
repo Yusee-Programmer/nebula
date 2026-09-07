@@ -45,8 +45,8 @@ Worth stating plainly, because the sketch describes several things that exist:
 | Animation + transitions | ❌ nothing; `Switch.tick()` is a hand-rolled counter |
 | Theme + design tokens | ⚠️ partial — the palette is there, no theme indirection |
 | Capability flags | ⚠️ implicit and ad-hoc (`SdlCanvas.draw_shadow` exists; GOP has no equivalent, callers just know) |
-| Scene graph | ❌ the interpreter paints immediately during its tree walk |
-| SDL_GPU / WebGPU | ❌ not started |
+| Scene graph | ✅ step C — `toolkit/render/scene.tr` + `execute_software()` |
+| SDL_GPU / WebGPU | ⛔ deferred — measured as unjustified, see §5a |
 
 So the "Extreme Renderer" half of the diagram is **done and proven**. What v4 really
 proposes is: (a) an IR between layout and paint, (b) a second, GPU-capable renderer,
@@ -88,10 +88,84 @@ and which is the same shape as the `LayoutBox` tree that is already rebuilt per 
 **Open question:** does the software rasterizer execute the scene graph, or does the
 scene graph replace the rasterizer's inputs? Cheapest path: `execute_software(scene,
 canvas)` keeps every existing `Canvas` backend working unchanged, and the scene graph
-becomes an internal detail rather than a breaking change. Recommended.
+becomes an internal detail rather than a breaking change. Recommended. **✅ This is
+what shipped — see §3a; no backend was touched and the hosted renders came out
+byte-identical.**
 
 ---
 
+
+---
+
+## 3a. Steps C and D — delivered 2026-09-07
+
+**C: the scene graph.** `Interpreter.paint()` became `Interpreter.emit()`, producing a
+flat `Scene` of commands, and a separate `execute_software(scene, canvas, font)` replays
+them. Shipped as:
+
+```
+toolkit/render/scene.tr   Cmd (tagged: rounded_rect | rounded_box | text), Scene
+toolkit/ui/interp.tr      emit(), build_scene(), execute_software()
+```
+
+Verified the strongest way available: **the three hosted PPMs are byte-identical to the
+pre-refactor renders.** All five tiers rechecked — hosted byte-identical, 81/81 token
+assertions, desktop compiles, web headless-verified in node (arena steady, correct
+colours, 540000/540000 pixels painted), bare metal on Cortex-M3 with the arena still
+flat across four frames, UEFI screenshot unchanged.
+
+**No `Canvas` backend was touched.** That was the design goal from §3's open question,
+and the answer it recommended turned out to be right: the commands bottom out in exactly
+the primitives the five backends already supported, so the scene graph is an internal
+detail rather than a change to the boundary the portability claim rests on.
+
+Cost: ~1.6 KB per frame on the bare-metal demo (arena 104856 → 106472 bytes), all of it
+reclaimed by the phase-1 per-frame reset.
+
+Two design notes, both recorded in `scene.tr`:
+
+- **It imports nothing.** `interp.tr` owns emitter and executor because the primitives
+  live there; if `scene.tr` called them it would import `interp`, which imports `scene`,
+  and Tauraro rejects cycles.
+- **A tagged class, not an enum.** `toolkit/ui/ast.tr` uses a real enum with `Pointer`
+  boxing because a UI tree is recursive and its variants differ structurally. A command
+  list is flat and its variants differ only in *which fields matter*, so one tagged class
+  costs an allocation instead of an allocation plus a box, and needs no match arm to read
+  a field. The unused fields are the price.
+
+**D: sub-rect rendering — and a correction to §3.**
+
+§3 said translating a finished command list would be the mechanism for sub-rect
+rendering. **That was wrong**, and `Scene.translate()` has been deleted rather than left
+as dead code.
+
+`place()` has always taken an origin — `layout_tree` simply passed `(0, 0)`. So the whole
+feature is `layout_tree_at(node, cache, x, y, w, h)`, with no translation anywhere.
+Translating a finished scene would also have been *incorrect*, not merely redundant:
+hit-testing walks the same tree the painter does, so boxes must carry absolute
+coordinates or `dispatch()` tests a different space than it paints.
+
+`render_into(it, tree, canvas, x, y, w, h, ambient)` is the public entry point — a free
+function for the same reason `render_to` is, since a method call does not auto-upcast a
+concrete backend to the `Canvas` interface.
+
+**The workaround it existed for is gone.** `examples/widgets_demo`'s tab content is now
+real markup rendered into its slot, replacing ~20 lines of host-painted primitives and
+the comment explaining why they were necessary.
+
+One sharp edge, documented at both the API and the call site: `render_rect` replaces
+`root`, so a caller compositing several regions and wanting clicks on all of them needs
+**one Interpreter per region**. The demo uses a second one for tab content; sharing the
+page's would have silently pointed OK/CANCEL at the tab tree, because the event drain
+hit-tests whatever root the previous frame left behind.
+
+The move also exposed a latent blending bug: the host-painted version passed the *canvas
+clear colour* as its antialiasing backdrop, blending every rounded corner toward a colour
+nothing had painted, since the chrome's `bg-slate-800` root covers the window.
+
+Regression test: `verified-examples/subrect_render.tr`, 10 assertions covering the two
+properties a screenshot cannot show — that previously painted chrome **survives** a
+sub-rect render, and that the resulting boxes carry absolute coordinates.
 ## 4. Capability flags
 
 The sketch's best small idea, because the problem is already real: `draw_shadow`
@@ -233,15 +307,15 @@ step shippable and leaving the repo green:
 |---|---|---|---|
 | ~~A~~ | ~~Probe SDL_GPU/SDL3~~ ✅ **done** | none | answered: dependency change, and not justified — see §5a |
 | **B** | `Caps` flags, wired to existing backends | low | honest shadow/alpha handling; no behaviour change |
-| **C** | Scene graph + `execute_software()` | medium | every `Canvas` backend keeps working; diffing and sub-rect become possible |
-| **D** | Sub-rect rendering via the scene graph | low | deletes the host-paint-the-dynamic-part workaround class |
+| ~~C~~ | ~~Scene graph + `execute_software()`~~ ✅ **done 2026-09-07** | medium | shipped; hosted PPMs byte-identical, all five tiers green |
+| ~~D~~ | ~~Sub-rect rendering~~ ✅ **done 2026-09-07** | low | shipped; `render_into()`, and the workaround is deleted from widgets_demo |
 | **E** | Grid layout | low | additive |
 | **F** | Node identity + state management | high | animation, real widgets in markup |
 | **G** | Animation + transitions | medium | needs F |
 | ~~H~~ | Modern Renderer (SDL_GPU / WebGPU) — **deferred**, see §5a | high | nothing we have needs it |
 | **I** | Diffing on the scene graph | medium | needs C. The measured win, and it helps every tier |
 
-**Recommended start: ~~A~~ → C → D → I.** A is done and removed H from the near-term
+**Recommended start: ~~A~~ → ~~C~~ → ~~D~~ → I.** A, C and D are done. A removed H from the near-term
 plan, so the IR and what it unlocks is now the whole point. That order gets the IR in
 place, keeps every tier green, and pays off immediately: D removes a workaround that
 currently infects every widget demo, and I is the only change measured to help the

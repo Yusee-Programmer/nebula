@@ -292,14 +292,28 @@ platform maximally unlike the ones already working.
 interop was settled by probe first, as planned — see CLAUDE.md for the resulting flags and
 ABI notes, and for a correction it forced to a Phase 1b claim.
 
-### Phase 3 — The `nebula` CLI
+### Phase 3 — The `nebula` CLI ⚠️ MOSTLY DONE (2026-09-07)
 
 - `init`, `dev`, `run --<target>`, `build`.
 - Generates the tier entry point, including the bump allocator now copy-pasted four times.
 - Absorbs the four PowerShell scripts and their flag folklore.
 - **Settle the CLI's implementation language first** (see §6).
 
-*Exit:* every existing demo builds and runs through `nebula`, no scripts invoked directly.
+*Exit:* ⚠️ **partly met.** `nebula init` scaffolds; `nebula run --hosted`, `--desktop`
+and `--web` build, compile and launch with no script invoked directly. `--uefi` and
+`--bare` generate their entry point but still shell out to the PowerShell scripts, which
+carry a linker script, a zig stub and a qemu invocation whose flag folklore was not worth
+re-deriving yet. So the allocator duplication is gone (the real win) but the scripts are
+not yet absorbed.
+
+**Settled:** open question 1 — Tauraro CAN list directories (`io.dir.Dir.list`) and spawn
+processes (`sys.process.Process.system` / `shell_output`), so `nebula` is one Tauraro
+binary rather than a Tauraro core wrapped in a shell script.
+
+**Cost:** three Tauraro bugs found and worked around, all with repros in `bugs.txt` —
+`OS.args()` calls a symbol the runtime does not define (#6), `Env.init()` exits with heap
+corruption (#7), and a doubled backslash in a string literal produces nothing at all
+(#8), which is why every path the CLI builds uses forward slashes.
 
 ### Phase 4 — App structure
 
@@ -335,7 +349,7 @@ Stated plainly, because each one can change a phase's shape.
 
 | # | Question | Why it matters | How to settle it |
 |---|---|---|---|
-| 1 | Can Tauraro list directories and spawn processes? | Decides whether `nebula` is a Tauraro binary or a Tauraro core + shell wrapper. Blocks Phase 3's shape. | A 20-line compiling probe. Do this before designing the CLI. |
+| ~~1~~ ✅ | ~~Can Tauraro list directories and spawn processes?~~ | **Settled 2026-09-07: yes.** `io.dir.Dir.list()` walks directories, `sys.process.Process.system/shell_output` spawns and captures. `nebula` is one Tauraro binary. | Done -- probed before the CLI was designed, as planned. |
 | 2 | ~~What does WASM interop look like?~~ | ✅ **SETTLED (2026-09-06).** Exports need `--freestanding` + `-rdynamic`; imports are zero (no WASI); `int`/`usize` are i64/BigInt, `Pointer[T]` is i32/Number; `__heap_base` gives the arena its base. | Probe. Done. |
 | 3 | Does SDL2 actually build for `android-arm64` / `ios` through `tauraroc`? | Decides whether Phase 5 is days or weeks. | Try the cross-build early; it is cheap to test. |
 | 4 | Is `--no-heap` viable for the smallest embedded targets? | The engine currently uses `List`/`Dict` throughout, so probably not without a parallel data path. Affects how far "embedded" reaches. | Compile the toolkit with `--no-heap` and read the errors. |

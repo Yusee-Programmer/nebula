@@ -266,7 +266,8 @@ toolkit/render/hosted/buffer.tr  BufferCanvas + clipping + PPM
 toolkit/text/font_data.tr     GENERATED: baked bitmap glyph atlas (scripts/bake-font.ps1)
 toolkit/text/font.tr          Font: pixel_coverage(codepoint, col, row) -> 0..16
 toolkit/layout/flex.tr        build/measure/place, row+col+gap+pad+grow (glyph size from font)
-toolkit/ui/interp.tr          tree walk, real glyph painting, hit-test, handler allowlist
+toolkit/render/scene.tr       Cmd + Scene: what to paint, separate from painting
+toolkit/ui/interp.tr          emit scene, execute it, hit-test, handler allowlist
 examples/hosted_demo/         main.tr + app.ui + app.reload.ui
 ```
 ## Class vocabulary: real Tailwind scales (changed 2026-09-06)
@@ -857,11 +858,46 @@ wraps those exact bytes in an `ImageData`. ABI: `int`/`usize` are i64 (BigInt in
 [R,G,B,A] where every other backend wants [B,G,R,X], so `WebCanvas` repacks — getting that
 wrong silently swaps red and blue.
 
-**Phase 3 — the `nebula` CLI.** `init` / `dev` / `run --<target>` / `build`. Generates each
-tier's entry point including the ~80-line bump allocator currently copy-pasted into four
-programs, and absorbs the four PowerShell scripts and their flag folklore. *Settle whether
-Tauraro can list directories and spawn processes before designing this* — it decides whether
-the CLI is a Tauraro binary or a Tauraro core plus a shell wrapper.
+**Phase 3 — the `nebula` CLI. ⚠️ MOSTLY DONE (2026-09-07).** One Tauraro binary:
+`cli/config.tr` + `cli/codegen.tr` + `cli/nebula.tr`, built with
+`tauraroc cli/nebula.tr -o nebula.exe`.
+
+```
+nebula init my-app
+cd my-app
+nebula run --hosted | --desktop | --web
+```
+
+It generates each tier's entry point — including the ~80-line bump allocator that was
+copy-pasted into four programs — so an app is just `app/page.ui` plus an `app/page.tr`
+exporting `register_all(it)`. **`--uefi` and `--bare` still shell out to the PowerShell
+scripts**: they need a linker script, a zig stub and a qemu invocation whose flag folklore
+was not worth re-deriving. The allocator duplication (the real win) is gone; the scripts
+are not yet absorbed.
+
+Settled on the way: Tauraro **can** list directories (`io.dir.Dir.list`) and spawn
+processes (`sys.process.Process.system`/`shell_output`) — which is what made a pure
+Tauraro CLI possible rather than a shell wrapper. Three new Tauraro bugs found doing it,
+all with repros in `bugs.txt`: `OS.args()` (#6), `Env.init()` heap corruption (#7), and a
+doubled backslash in a string literal producing nothing (#8) — hence forward slashes in
+every path the CLI builds.
+
+**Proposal v4 steps A, C and D are also done** (see
+`docs/proposal/proposal-v4-renderer-architecture.md`):
+
+- **A** measured the render paths and **deferred the GPU renderer**: SDL_GPU is SDL3-only
+  and absent from our SDL2 bindings; the SDL2 renderer is already `ACCELERATED`; a
+  streaming texture is 1.8x *slower*; and rasterization is only 48% of frame cost at
+  219 fps. A GPU renderer helps only the tiers that are already fast.
+- **C** put a scene graph between layout and paint (`toolkit/render/scene.tr`,
+  `execute_software()`), verified by the hosted PPMs coming out **byte-identical**. No
+  `Canvas` backend was touched.
+- **D** added `render_into()` for sub-rect rendering, which **deleted** the
+  host-paint-the-dynamic-part workaround from `examples/widgets_demo` — tab content is
+  now real markup. Regression test: `verified-examples/subrect_render.tr`.
+
+Next in that plan is **I — diffing on the scene graph**, the only change step A measured
+as helping the slow tiers.
 
 **Phase 4 — app structure.** Folder-based screens resolved at BUILD time (no filesystem on
 freestanding tiers, so codegen emits markup as string constants), `layout.ui` composition,
@@ -878,8 +914,11 @@ workaround class), diffing, `templa` integration, then images/per-corner radii/s
 
 ### Open questions to settle with a compiling probe, not by reading docs
 
-1. Can Tauraro list directories and spawn processes? (blocks Phase 3's shape)
-2. What does WASM interop look like — exports to JS, imports from it? (blocks Phase 2)
+1. ~~Can Tauraro list directories and spawn processes?~~ ✅ **SETTLED: yes** (2026-09-07).
+   `io.dir.Dir.list()` and `sys.process.Process.system`/`shell_output` all work.
+2. ~~What does WASM interop look like?~~ ✅ **SETTLED** (2026-09-06). Exports need
+   `--freestanding` + `-rdynamic`; imports are zero (no WASI); `int`/`usize` are
+   i64/BigInt while `Pointer[T]` is i32/Number; `__heap_base` gives the arena its base.
 3. Does SDL2 actually cross-build for `android-arm64`/`ios`? (decides if Phase 5 is days or weeks)
 4. Is `--no-heap` viable for the smallest embedded targets? (the engine uses `List`/`Dict`
    throughout, so probably not without a parallel data path)

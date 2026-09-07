@@ -65,6 +65,26 @@ already cross-compiles to `wasm`, `wasm-wasi`, `android-*`, `ios`, `macos-*`, `l
 
 ## Quick start
 
+### With the `nebula` CLI (recommended)
+
+```sh
+tauraroc cli/nebula.tr -o nebula.exe    # build the CLI once
+
+nebula init my-app
+cd my-app
+nebula run --hosted     # fastest loop: renders a PPM
+nebula run --desktop    # a real window
+nebula run --web        # a wasm module + host page
+```
+
+An app is `app/page.ui` (the UI, as data) plus `app/page.tr` (handlers, via
+`register_all(it)`). The CLI generates every tier's entry point -- including the bump
+allocator the freestanding targets need -- so none of that is yours to write. `--uefi`
+and `--bare` work too, but still delegate to `scripts/` for their linker script, zig
+stub and qemu invocation.
+
+### Directly, against the repo
+
 Run everything from the repository root, so `toolkit.*` module paths resolve.
 
 ```sh
@@ -104,14 +124,16 @@ Templating is **`templa`** (this project's own engine), integrated later.
 ```
 toolkit/ui/          markup AST, parser, interpreter, style, palette, scale, widgets
 toolkit/layout/      flexbox subset
-toolkit/render/      Canvas interface + one directory per backend
+toolkit/render/      Canvas interface, scene graph, one directory per backend
 toolkit/text/        baked antialiased glyph atlas + lookup
 examples/quickstart/ the smallest complete program — start here
 examples/            one demo per tier, plus the nine-widget showcase
-docs/proposal/       the spec (v3 is current)
+cli/                 the `nebula` command: config, codegen, toolchain driver
+docs/proposal/       the spec (v3 shipping, v4 in progress)
 verified-examples/   .tr programs confirmed to compile and run, incl. token tests
 scripts/             per-tier build/run, font baking, palette generation
 RASTERIZER.md        the rasterizer spec — read before touching a shape primitive
+bugs.txt             confirmed Tauraro defects, each with a minimal repro
 CLAUDE.md            project memory: verified language facts, gotchas, plan
 ```
 
@@ -121,6 +143,9 @@ CLAUDE.md            project memory: verified language facts, gotchas, plan
   where it stands, and the phased plan. Start here.
 - **`CLAUDE.md`** — project memory. Verified Tauraro language facts (several of which
   contradict the upstream docs), per-tier build folklore, and hard-won gotchas.
+- **`docs/proposal/proposal-v4-renderer-architecture.md`** — the next architecture: scene
+  graph, capability flags, two renderers. Steps A, C and D are done; A is a measured
+  argument for *not* building a GPU renderer yet.
 - **`RASTERIZER.md`** — how antialiasing works without an alpha channel, and how to add a
   shape primitive without breaking the portability guarantee.
 

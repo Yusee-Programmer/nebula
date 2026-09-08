@@ -20,3 +20,15 @@ pub interface Canvas:
     def height(self) -> int
     def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> void
     def set_pixel(self, x: int, y: int, color: int) -> void
+    # nebula1.0 Phase 2: real translucency, where a backend can actually do
+    # it. `alpha` is a 0-255 byte (0 = fully transparent, i.e. paints
+    # nothing; 255 = fully opaque, i.e. identical to fill_rect). A backend
+    # that CANNOT blend (no destination read-back, or genuinely write-only
+    # firmware memory -- see this file's own header) implements this as a
+    # plain opaque `self.fill_rect(x, y, w, h, color)`, ignoring `alpha`
+    # entirely: always SAFE (never crashes, never corrupts), just not
+    # translucent -- the same "degrades to the old behavior" contract
+    # Caps.alpha_blend already documents (toolkit/render/caps.tr). Check
+    # that flag before relying on visible translucency; calling this is
+    # always fine either way.
+    def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void

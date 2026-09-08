@@ -425,8 +425,10 @@ SEVERITY  Low -- clear compile error, easy one-line workaround, found in
           passing while wiring proposal v4 step B (Caps flags) and not
           chased further.
 TARGETS   All. Confirmed hosted (windows-x64).
-STATUS    Open. Not root-caused -- deprioritized in favor of nebula feature
-          work; import the name unqualified instead (see workaround).
+STATUS    FIXED 2026-09-08 (tauraroc). Root-caused and fixed in the compiler
+          (src/parser.tr) -- see CAUSE/FIX below. The unqualified-import
+          workaround still works and needs no reverting, but is no longer
+          required for new code.
 
 REPRO
   # toolkit/render/desktop/sdl_canvas.tr exports:
@@ -440,20 +442,36 @@ OBSERVED
   build/main.c:1630:27: error: invalid type argument of '->' (have 'int')
 
 CAUSE
-  Not investigated. `bindgen`'s own docs (tauraro's docs/lang/24_bindgen.md)
-  show `from zlib import crc32 as checksum` as valid for an EXTERN-bound
-  function; whatever that path does to resolve the alias to the real
-  (possibly module-mangled) C symbol name doesn't appear to run for a plain
-  Tauraro-defined free function re-exported the same way.
+  `ImportItem.alias` (src/ast.tr) was parsed correctly (`Name as Alias`) but
+  was NEVER READ anywhere except src/fmt.tr's source formatter, which just
+  echoes it back out. No resolver/sema/codegen pass ever bound the alias
+  name to anything -- so `from module import x as y` silently behaved
+  exactly like `from module import x`: only the ORIGINAL name `x` was ever
+  callable, matching bindgen's docs being right for EXTERN-bound symbols
+  (aliasing was never actually the mechanism there either -- likely a
+  different, coincidental path) while a plain Tauraro-defined free function
+  had no such luck.
 
-WORKAROUND
+FIX
+  src/parser.tr: Parser gained an `import_aliases: Map[str, str]` field,
+  populated in the `from module import ... as alias` parse path (records
+  alias -> real name). Resolved at the CALL SITE, not via a broader
+  identifier rewrite: `parse_postfix`'s `Token.LParen` case rewrites a bare
+  `EIdent` callee to its real name immediately before building the `ECall`,
+  if it matches a registered alias. Deliberately narrow -- only "a plain
+  identifier immediately followed by `(`" is rewritten, so a local variable
+  or parameter that happens to share a name with some OTHER file's alias is
+  never touched (no scope/shadowing analysis needed). Works because
+  Tauraro's unity build already makes every imported module's real names
+  globally visible regardless of the import list (see the `from module
+  import *` feature) -- the alias only ever needed to become a synonym for
+  a name that was already reachable.
+
+WORKAROUND (no longer required, kept for reference)
   Import the name unqualified and call it as-is:
       from toolkit.render.desktop.sdl_canvas import caps
       ...
       caps().shadows
-  Only a problem when two imported modules export the SAME free-function
-  name and both are needed unqualified in one file -- not yet hit in nebula,
-  since each Canvas backend's own `caps()` is used one module at a time.
 
 
 --------------------------------------------------------------------------
@@ -472,11 +490,23 @@ SEVERITY  High in principle (silent heap corruption, no crash, wrong data
           that test now avoids the pattern (see WORKAROUND) rather than
           exercising undefined behavior.
 TARGETS   Default (C) backend. Not tested against --backend native/llvm.
-STATUS    Open. Root-caused to the field-read boundary (see CAUSE) but NOT
-          fixed -- a class-field ARC change is compiler-core work with its
-          own bless/fixpoint cycle, out of scope for a nebula work session;
-          left for whoever next touches src/codegen/c.tr's field-access or
-          retain/release lowering.
+STATUS    FIXED 2026-09-08 (tauraroc). Root-caused to the field-read
+          boundary (see CAUSE) and fixed in src/codegen/c.tr -- see FIX
+          below. Full gen1->gen2->gen3->gen4 self-host fixpoint verified
+          (converged at gen3<->gen4, byte-identical --emit c output; one
+          generation later than usual because the bug affected the OLD,
+          unfixed compiler's own compilation of the compiler's source,
+          which itself has this exact `mut x = obj.field` pattern
+          throughout), full tests/lang + tests/regression suite (17 files)
+          clean, all 37 examples/*.tr compile+run clean except two
+          confirmed PRE-EXISTING failures unrelated to this fix
+          (25_new_features.tr: unrelated Future-struct forward-declaration
+          ordering bug; ffi_callbacks.tr: unrelated missing-link-symbol
+          bug -- both reproduce identically on the pre-fix compiler).
+          nebula's own workaround (never hold a node_key/str-field value
+          across a render() boundary) remains correct and is NOT required
+          to be reverted -- it was always the right design regardless of
+          this fix (see verified-examples/node_identity.tr's own comment).
 
 REPRO (minimal, outside nebula)
   pub class Node:
@@ -513,7 +543,7 @@ REPRO (minimal, outside nebula)
                                          # later allocations reusing that
                                          # memory silently corrupt it.
 
-CAUSE (characterized, not fixed)
+CAUSE
   A companion repro proves the boundary precisely: keeping the WHOLE OLD
   OBJECT alive via a second local (`mut old = h.root`, a class-typed
   assignment) instead of just its field DOES protect `old.key` correctly
@@ -524,7 +554,39 @@ CAUSE (characterized, not fixed)
   class ARC in general and not string ARC in general (plain string locals
   and collection-stored strings are documented elsewhere as ARC-correct).
 
-WORKAROUND
+  Precisely: src/codegen/c.tr's `str_retain_wrap` (the function that
+  decides whether a str-producing expression needs `_tr_str_retain()`
+  before being bound) only retained an `EPropAccess` (field-read) source
+  when `is_return` was true (a `-> str` return). The SLet/SAssign
+  first-declaration codegen paths (a fresh `mut x = obj.field`) call it
+  with `is_return=false`, so no retain ever happened there, AND the local
+  was explicitly excluded from `str_local_names` tracking (the "this local
+  owns a reference, release it at scope exit" bookkeeping) for exactly this
+  source shape -- both halves of ownership were skipped, consistent with
+  each other but wrong, since the field's owning object can be
+  replaced/freed independently of this local's lifetime.
+
+  The codebase had ALREADY found and fixed the identical gap once before,
+  but only for REASSIGNMENT (`x = obj.field` where `x` already exists) and
+  field-to-field STORES (`a.f = b.g`) -- both carry a comment tagged "#21"
+  explaining precisely this same UAF and manually retaining around it. The
+  fix was simply never extended to the first-declaration paths, which is
+  exactly what nebula's repro hit (`mut captured = h.root.key`).
+
+FIX
+  Applied the SAME "#21-style" manual retain used at the already-fixed
+  reassignment/field-store call sites to the two first-declaration paths
+  that were missing it (src/codegen/c.tr, HirStmt.SLet and HirStmt.SAssign
+  first-declare): when the RHS is an `EPropAccess`, wrap it in
+  `_tr_str_retain(...)` and register the new local in `str_local_names` so
+  it is released at scope exit like any other owned local (balancing the
+  new retain). `str_retain_wrap` itself was left unchanged -- editing it to
+  always retain would have double-retained at the already-patched
+  reassignment/field-store sites, which apply their own manual retain on
+  top of calling it.
+
+WORKAROUND (no longer required now the compiler is fixed, kept for
+context on why nebula's own code is still written this way)
   Never hold a class's str field in a local past a point where the owning
   object could be freed/replaced. Either:
     (a) keep the owning object itself alive in a local (`mut old = obj`)
@@ -539,4 +601,5 @@ WORKAROUND
   free it. verified-examples/node_identity.tr's own structural-stability
   check now compares two independently-built, simultaneously-alive
   Interpreters instead of reusing one across two render() calls, and its
-  state-persistence check uses pattern (a) explicitly.
+  state-persistence check uses pattern (a) explicitly -- left as-is since
+  it was always the right design, not merely a bug workaround.

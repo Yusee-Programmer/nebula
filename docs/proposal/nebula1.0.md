@@ -179,35 +179,57 @@ Phase 2 -- Modern Quality
     Basic animation: DONE (Interpreter.anim_toward, generalizing
       Switch.tick()'s hand-rolled step-toward-target pattern to any node
       via its step-F identity; step G. Verified: animation.tr).
-    Multi-size font system: NOT done. toolkit/text/font.tr wraps one
-      baked, fixed-cell-size glyph atlas (toolkit/text/font_data.tr) --
-      every text node renders at that one size. A real multi-size system
-      needs either multiple baked atlases selected by a size token, or a
-      scalable (SDF or vector) glyph renderer; either is its own project,
-      not an incremental change to the current baking pipeline.
+    Multi-size font system: DONE (2026-09-08). Three baked atlases
+      (toolkit/text/font_data{,_sm,_lg}.tr -- 6x10/8x14/12x20 -- via
+      scripts/bake-font.ps1's new -Suffix param), a Fonts holder
+      (toolkit.text.font.Fonts) an Interpreter loads once and every text
+      Cmd picks from by its own carried font_size, and a `text-sm`/
+      `text-base`/`text-lg` style token. Layout (toolkit.layout.flex's
+      glyph_w/glyph_h) and paint (execute_software/execute_diff) read the
+      SAME per-node size so a line is never measured against one atlas and
+      painted from another. Verified: multi_size_font.tr.
     Proper text shaping: NOT done, and not close -- the current text path
       is fixed-width glyph cells with no kerning, ligatures, or complex
       script support. A real shaping engine (even a minimal Latin-only
-      kerning table) is a substantial standalone effort.
-    Opacity: architecturally excluded, on purpose, not merely undone.
-      Canvas has no alpha channel or destination read-back anywhere (see
-      toolkit/render/canvas.tr and proposal-v4 9's own point: that
-      minimalism is exactly what lets the bare-metal/UEFI tiers -- plain
-      write-only framebuffer memory that genuinely cannot blend -- share
-      the same interface as everything else). Real opacity needs a
-      SEPARATE, richer interface layered above Canvas for the tiers that
-      can support it, matching proposal-v4's own "Renderer... let it be
-      the richer interface above" pushback point -- not a Canvas change.
-    Clipping: only a safety clamp exists today (every fill_rect call
-      clips its own rect to the destination canvas's bounds) plus the
-      one-level rectangular constraint render_into()/render_rect() give a
-      sub-tree (step D). Nested, arbitrary "overflow: hidden" clip regions
-      for markup content are not implemented.
+      kerning table) is a substantial standalone effort, deliberately left
+      out of scope this session for that reason.
+    Opacity: DONE (2026-09-08), narrower than a general alpha channel by
+      design. Canvas gained `fill_rect_alpha(x,y,w,h,color,alpha)`; a
+      backend that can genuinely blend (SdlCanvas -- real GPU blend via
+      SDL_SetRenderDrawBlendMode; BufferCanvas -- real read-blend-write,
+      since unlike firmware memory it already reads its own buffer back
+      for to_ppm/get_px) does; a backend that cannot (FrameBuffer, GopCanvas,
+      WebCanvas -- genuinely write-only or just not wired up yet) falls
+      back to a safe opaque fill_rect, never a crash or corruption. An
+      `opacity-N` style token, only honoured on a box's own PLAIN
+      (radius<=0, unbordered) fill -- rounded/bordered opacity would need
+      paint_rounded_rect_aa's per-pixel corner blends to ALSO factor in
+      destination alpha, not attempted. Verified: opacity.tr.
+    Clipping: DONE (2026-09-08). toolkit/render/clipped_canvas.tr's
+      ClippedCanvas wraps any Canvas and intersects every fill_rect/
+      set_pixel against its own rect -- nesting composes for free by
+      wrapping a ClippedCanvas in another one, no explicit stack needed.
+      A `clip` style token brackets a box's children (not the box's own
+      background) with clip_push/clip_pop scene commands; execute_software
+      walks them via RECURSION rather than a Canvas stack, since Canvas is
+      an interface and Tauraro's generic List[T]/Array[T] storage cannot
+      hold an interface's fat-pointer value directly (confirmed by trying
+      it). render_diff() falls back to a full repaint whenever a scene
+      contains any clip command (scene_has_clip) -- clip-aware diffing
+      is a distinct, unattempted follow-up, not a correctness gap.
+      Verified: clipping.tr.
     Component model: NOT done. Step F (node identity + persistent
-      per-node state, this session) is the prerequisite primitive a real
-      component/slot abstraction would be built on, but no such
-      abstraction exists yet -- today's markup is still plain tag trees,
-      not reusable authored components.
+      per-node state) is the prerequisite primitive a real component/slot
+      abstraction would be built on, but no such abstraction exists yet --
+      today's markup is still plain tag trees, not reusable authored
+      components. Deliberately left for a future session: it is a real
+      architecture decision (what does a "component" look like in this
+      markup format, how do props/slots resolve) that deserves design time
+      rather than a rushed pass, and by this point in the session every
+      nebula build was taking 20-30+ minutes (all three baked font atlases
+      now compile into every program that imports toolkit.ui.interp),
+      making the kind of fast iterative refinement a new abstraction like
+      this needs impractical to do responsibly in one more sitting.
 
 Phase 3 -- Platform Expansion
     Android/iOS/TV via SDL2: not separately implemented because the

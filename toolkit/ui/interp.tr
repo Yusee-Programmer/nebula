@@ -13,10 +13,11 @@
 from toolkit.types import Event, EventHandler, event_name_for_kind, ev_key, rgb, red_of, green_of, blue_of
 from toolkit.ui.ast import UiNode, max_depth
 from toolkit.ui.style import StyleCache, unset
-from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text, cmd_eq, scenes_diffable
+from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text, cmd_clip_push, cmd_clip_pop, cmd_eq, scenes_diffable, scene_has_clip
 from toolkit.layout.flex import LayoutBox, layout_tree, layout_tree_at, kind_text
 from toolkit.render.canvas import Canvas
-from toolkit.text.font import Font
+from toolkit.render.clipped_canvas import clip_canvas
+from toolkit.text.font import Font, Fonts
 from string.str import Str
 
 # One entry in the handler allowlist: a name UI content may reference, and the
@@ -27,7 +28,10 @@ pub class HandlerSlot:
 
 pub class Interpreter:
     pub cache:    StyleCache
-    pub font:     Font
+    # nebula1.0 Phase 2 (multi-size fonts): one Interpreter needs all THREE
+    # baked atlases loaded, not just one -- a single scene routinely mixes
+    # text-sm/text-base/text-lg nodes. See toolkit.text.font.Fonts.
+    pub fonts:    Fonts
     pub handlers: List[HandlerSlot]
     pub root:     LayoutBox
     pub has_root: bool
@@ -68,7 +72,7 @@ extend Interpreter:
     pub def init() -> Interpreter:
         mut it = Interpreter()
         it.cache = StyleCache.init()
-        it.font = Font.load()
+        it.fonts = Fonts.load()
         it.handlers = []
         it.has_root = false
         it.renders = 0
@@ -164,7 +168,7 @@ extend Interpreter:
         # working unchanged, and the scene graph stays an internal detail
         # rather than a breaking change to the four shipping tiers.
         mut scene = self.build_scene(self.root_bg)
-        execute_software(scene, c, self.font)
+        execute_software(scene, c, self.fonts)
 
     # Renders a tree into a SUB-RECTANGLE instead of the whole canvas.
     #
@@ -183,7 +187,7 @@ extend Interpreter:
         self.has_root = true
         self.renders = self.renders + 1
         mut scene = self.build_scene(ambient)
-        execute_software(scene, c, self.font)
+        execute_software(scene, c, self.fonts)
 
     # Proposal v4 step I: like render(), but repaints only the commands that
     # actually changed since the last render_diff() call on this Interpreter
@@ -208,10 +212,16 @@ extend Interpreter:
         self.has_root = true
         self.renders = self.renders + 1
         mut scene = self.build_scene(self.root_bg)
-        if self.has_last_scene and scenes_diffable(self.last_scene, scene):
-            execute_diff(self.last_scene, scene, c, self.font)
+        # nebula1.0 Phase 2 (clipping): see scene_has_clip's own comment --
+        # a clipped command's on-screen pixels depend on its enclosing
+        # push's rect, not just its own fields, so position-by-position
+        # cmd_eq alone cannot safely skip repainting inside a clipped
+        # region. Always correct (full repaint), not yet optimized, for
+        # any frame that uses clip.
+        if self.has_last_scene and scenes_diffable(self.last_scene, scene) and not scene_has_clip(scene):
+            execute_diff(self.last_scene, scene, c, self.fonts)
         else:
-            execute_software(scene, c, self.font)
+            execute_software(scene, c, self.fonts)
         self.last_scene = scene
         self.has_last_scene = true
 
@@ -293,19 +303,37 @@ extend Interpreter:
                 inner_fill = ambient_bg
             scene.add(Cmd.rounded_box(box.x, box.y, box.w, box.h, box.style.radius, box.style.border_w, inner_fill, border, ambient_bg))
         elif bg != unset():
-            scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, box.style.radius, bg, ambient_bg))
+            # nebula1.0 Phase 2: opacity-N -> a 0-255 alpha byte, carried on
+            # the Cmd so execute_software/execute_diff decide (backend-
+            # dependent) whether it can actually be honoured -- see
+            # Style.opacity_pct's own comment for the current scope
+            # (plain, unbordered fills only).
+            mut alpha_byte = box.style.opacity_pct * 255 / 100
+            scene.add(Cmd.rounded_rect_alpha(box.x, box.y, box.w, box.h, box.style.radius, bg, ambient_bg, alpha_byte))
 
         if box.kind == kind_text():
             # Text sits directly on THIS box's own resolved surface (its own
             # bg if it set one, otherwise whatever shows through it) -- not
             # on `ambient_bg`, which is what's behind the box as a WHOLE, a
             # different thing whenever the box itself painted something.
-            scene.add(Cmd.label(box.x, box.y, box.text, box.style.fg, child_ambient))
+            scene.add(Cmd.label(box.x, box.y, box.text, box.style.fg, child_ambient, box.style.font_size))
+
+        # nebula1.0 Phase 2 (clipping): `clip` bounds everything painted by
+        # this box's CHILDREN to this box's own rect -- not this box's own
+        # background/border above, which paint unclipped (matches CSS:
+        # overflow:hidden clips a container's content, not the container
+        # itself). See toolkit/render/clipped_canvas.tr for the mechanism
+        # execute_software/execute_diff apply these bracketing commands with.
+        if box.style.clip:
+            scene.add(Cmd.clip_push(box.x, box.y, box.w, box.h))
 
         mut i = 0
         while i < len(box.children):
             self.emit(box.children[i], scene, child_ambient)
             i = i + 1
+
+        if box.style.clip:
+            scene.add(Cmd.clip_pop())
 
     # Builds the scene for the current tree without painting it. Public so a
     # caller can inspect, translate or diff a frame before it is drawn.
@@ -330,7 +358,7 @@ extend Interpreter:
     # fill_circle_aa/paint_rounded_rect_aa's (a caller-known flat backdrop,
     # since Canvas.set_pixel has no alpha channel to blend with on its own).
     def paint_text(self, box: LayoutBox, c: Canvas, own_bg: int) -> void:
-        draw_text(c, self.font, box.text, box.x, box.y, box.style.fg, own_bg)
+        draw_text(c, self.fonts.pick(box.style.font_size), box.text, box.x, box.y, box.style.fg, own_bg)
 
     # --- events ----------------------------------------------------------
 
@@ -923,17 +951,58 @@ pub def render_diff_to(it: Interpreter, node: Pointer[UiNode], c: Canvas) -> voi
 # Kept in this module rather than in toolkit/render/scene.tr because the
 # primitives live here, and scene.tr must import nothing to stay off the
 # import cycle (Tauraro rejects circular imports).
-pub def execute_software(scene: Scene, c: Canvas, font: Font) -> void:
-    mut i = 0
+pub def execute_software(scene: Scene, c: Canvas, fonts: Fonts) -> void:
+    exec_cmds(scene, 0, c, fonts)
+
+# Proposal v4 / nebula1.0 Phase 2 (clipping): processes commands starting at
+# `start`, painting through `active`, until either the list ends or a
+# clip_pop closes an enclosing push (the CALLER's own, if this call is
+# itself nested inside one) -- returns the index of the first unprocessed
+# command. RECURSION, not an explicit stack: Canvas is an INTERFACE, and
+# Tauraro's generic List[T]/Array[T] storage is a raw void*-based slot that
+# cannot hold an interface's fat-pointer representation directly (confirmed
+# by trying it -- `List[Canvas]` fails to compile, "incompatible type...
+# expected 'void *' but argument is of type 'Canvas_obj'"). Each nesting
+# level's own `active` is a plain function PARAMETER instead, never
+# collection-stored, which sidesteps that entirely. A recursive FREE
+# FUNCTION returning non-void is the proven-safe shape on freestanding
+# targets (see hit_test's own comment: the hang is specific to a private
+# recursive METHOD returning str, not recursion or a non-void return in
+# general), and nesting depth is already bounded by toolkit.ui.ast's
+# max_depth() -- the same cap that bounded how deeply emit() could have
+# nested these pushes to begin with.
+def exec_cmds(scene: Scene, start: int, active: Canvas, fonts: Fonts) -> int:
+    mut i = start
     while i < len(scene.cmds):
         mut cmd = scene.cmds[i]
         if cmd.kind == cmd_rounded_rect():
-            paint_rounded_rect_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.fill, cmd.ambient)
+            # nebula1.0 Phase 2: opacity. Only honoured for a PLAIN rect
+            # (radius<=0) -- paint_rounded_rect_aa's antialiased corners
+            # blend per-pixel toward `ambient` via set_pixel, which has no
+            # alpha parameter at all, so real translucency there would need
+            # those corner blends to ALSO factor in destination alpha, not
+            # attempted yet. A rounded+opaque rect (the overwhelmingly
+            # common case) is unaffected either way -- alpha==255 always
+            # takes this same paint_rounded_rect_aa path it always did.
+            if cmd.alpha < 255 and cmd.radius <= 0:
+                active.fill_rect_alpha(cmd.x, cmd.y, cmd.w, cmd.h, cmd.fill, cmd.alpha)
+            else:
+                paint_rounded_rect_aa(active, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.fill, cmd.ambient)
+            i = i + 1
         elif cmd.kind == cmd_rounded_box():
-            paint_rounded_box_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
+            paint_rounded_box_aa(active, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
+            i = i + 1
         elif cmd.kind == cmd_text():
-            draw_text(c, font, cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
-        i = i + 1
+            draw_text(active, fonts.pick(cmd.font_size), cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
+            i = i + 1
+        elif cmd.kind == cmd_clip_push():
+            mut next_active: Canvas = clip_canvas(active, cmd.x, cmd.y, cmd.w, cmd.h)
+            i = exec_cmds(scene, i + 1, next_active, fonts)
+        elif cmd.kind == cmd_clip_pop():
+            return i + 1
+        else:
+            i = i + 1
+    return i
 
 # Proposal v4 step I: like execute_software, but skips any command that's
 # identical to the SAME position in `prev` -- the pixels it would paint are
@@ -952,16 +1021,21 @@ pub def execute_software(scene: Scene, c: Canvas, font: Font) -> void:
 # Cmd.label() always sets w=0/h=0 (labels aren't boxes), so there's no
 # stored width to clear even if this needed to. Revisit when proposal step F
 # (node identity + state) lands real per-frame-changing text content.
-pub def execute_diff(prev: Scene, curr: Scene, c: Canvas, font: Font) -> void:
+pub def execute_diff(prev: Scene, curr: Scene, c: Canvas, fonts: Fonts) -> void:
     mut i = 0
     while i < len(curr.cmds):
         mut cmd = curr.cmds[i]
         mut prev_cmd = prev.cmds[i]
         if not cmd_eq(prev_cmd, cmd):
             if cmd.kind == cmd_rounded_rect():
-                paint_rounded_rect_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.fill, cmd.ambient)
+                # nebula1.0 Phase 2: same opacity scope as exec_cmds
+                # (execute_software's own helper) -- see its comment.
+                if cmd.alpha < 255 and cmd.radius <= 0:
+                    c.fill_rect_alpha(cmd.x, cmd.y, cmd.w, cmd.h, cmd.fill, cmd.alpha)
+                else:
+                    paint_rounded_rect_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.fill, cmd.ambient)
             elif cmd.kind == cmd_rounded_box():
                 paint_rounded_box_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
             elif cmd.kind == cmd_text():
-                draw_text(c, font, cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
+                draw_text(c, fonts.pick(cmd.font_size), cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
         i = i + 1

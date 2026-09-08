@@ -88,6 +88,12 @@ extend GopCanvas:
                     xx = xx + 1
                 yy = yy + 1
 
+    # No blending -- a UEFI GOP framebuffer is genuinely write-only memory
+    # (see canvas.tr's own comment on fill_rect_alpha), so alpha is ignored
+    # and this paints fully opaque, exactly like fill_rect.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        self.fill_rect(x, y, w, h, color)
+
     pub def set_pixel(self, x: int, y: int, color: int) -> void:
         if x < 0:
             return

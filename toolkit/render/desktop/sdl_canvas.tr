@@ -174,6 +174,28 @@ extend SdlCanvas:
             SDL_SetRenderDrawColor(self.ren, red_of(color) as Uint8, green_of(color) as Uint8, blue_of(color) as Uint8, 255 as Uint8)
             SDL_RenderDrawPoint(self.ren, x as c_int, y as c_int)
 
+    # Real GPU alpha blending -- same SDL_SetRenderDrawBlendMode/reset
+    # bracket draw_shadow below already uses, just for one caller-chosen
+    # flat rect instead of the fixed shadow-layer stack. Blend mode is
+    # reset to `none` afterward so every OTHER fill_rect/set_pixel call
+    # (which never expects blending) keeps painting fully opaque, matching
+    # the state SDL_CreateRenderer starts a renderer in.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        unsafe:
+            SDL_SetRenderDrawBlendMode(self.ren, sdl_blendmode_blend())
+            SDL_SetRenderDrawColor(self.ren, red_of(color) as Uint8, green_of(color) as Uint8, blue_of(color) as Uint8, alpha as Uint8)
+            mut r = SDL_Rect()
+            r.x = x as c_int
+            r.y = y as c_int
+            r.w = w as c_int
+            r.h = h as c_int
+            SDL_RenderFillRect(self.ren, alloc_rect(r))
+            SDL_SetRenderDrawBlendMode(self.ren, sdl_blendmode_none())
+
     # A soft drop shadow, SDL2-only -- deliberately NOT on the Canvas interface
     # (see toolkit/render/canvas.tr's own comment on why that stays minimal):
     # this needs real alpha blending, which the bare-metal MMIO and UEFI GOP

@@ -54,6 +54,22 @@ pub def dir_col() -> int:
 pub def dir_grid() -> int:
     return 2
 
+# nebula1.0 Phase 2: the SAME three numbers toolkit.text.font's
+# font_size_sm()/_base()/_lg() use -- re-declared here rather than
+# imported, the same reason toolkit.ui.palette.no_color()'s own comment
+# gives for unset() a few lines below: this file cannot import
+# toolkit.text.font without risking a cycle (font.tr is reached from
+# toolkit.ui.interp, which already imports this file), so both sides just
+# agree on the same literal values instead.
+pub def font_size_sm() -> int:
+    return 0
+
+pub def font_size_base() -> int:
+    return 1
+
+pub def font_size_lg() -> int:
+    return 2
+
 # Alignment values, shared by both axes -- `justify` positions children along
 # the main axis, `align` along the cross axis, exactly as CSS flexbox does.
 # `align_stretch` is cross-axis only (a child with no explicit cross size
@@ -137,6 +153,27 @@ pub class Style:
     # item when a list of otherwise-identical siblings gets reordered; see
     # that file's own comment on build() for the full mechanism.
     pub key: str
+    # nebula1.0 Phase 2: `clip` -- this box's own painted rect becomes an
+    # "overflow: hidden" boundary for everything painted inside it (its own
+    # background/border are NOT clipped by this, only its CHILDREN -- same
+    # as CSS). See toolkit/render/clipped_canvas.tr for the mechanism.
+    pub clip: bool
+    # nebula1.0 Phase 2: `opacity-N` (0-100, tailwind-style percent, NOT
+    # this file's usual 4x spacing scale -- opacity has no natural "unit"
+    # to scale). 100 = fully opaque, the default. Only honoured for a
+    # box's own plain (radius<=0, no border) fill today -- see
+    # toolkit.ui.interp.execute_software's own comment on why rounded/
+    # bordered opacity isn't attempted yet.
+    pub opacity_pct: int
+    # nebula1.0 Phase 2: `text-sm` / `text-base` / `text-lg` -- which of
+    # the three baked font atlases (toolkit/text/font.tr's font_size_sm()/
+    # _base()/_lg(), the SAME three numbers) this node's own text (or a
+    # text-node CHILD's text) renders at. Applies per text NODE, not
+    # inherited down the tree like CSS font-size would be -- see
+    # toolkit.layout.flex's measure()/place() and toolkit.ui.interp's
+    # emit() for where this is actually read; a container node setting it
+    # has no visible effect unless it IS the text node.
+    pub font_size: int
 
 extend Style:
     pub def default() -> Style:
@@ -168,6 +205,9 @@ extend Style:
         s.align    = align_stretch()
         s.grid_cols = 0
         s.key      = ""
+        s.clip     = false
+        s.opacity_pct = 100
+        s.font_size = font_size_base()
         return s
 
     pub def copy(self) -> Style:
@@ -199,10 +239,13 @@ extend Style:
         s.align    = self.align
         s.grid_cols = self.grid_cols
         s.key      = self.key
+        s.clip     = self.clip
+        s.opacity_pct = self.opacity_pct
+        s.font_size = self.font_size
         return s
 
     pub def to_str(self) -> str:
-        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + " grid_cols=" + self.grid_cols.to_str() + " key=" + self.key + ")"
+        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + " grid_cols=" + self.grid_cols.to_str() + " key=" + self.key + " clip=" + self.clip.to_str() + " opacity_pct=" + self.opacity_pct.to_str() + " font_size=" + self.font_size.to_str() + ")"
 
 def hex_digit_val(c: str) -> int:
     if c == "0": return 0
@@ -352,6 +395,46 @@ def apply_grid_token(s: Style, token: str) -> bool:
 def apply_key_token(s: Style, token: str) -> bool:
     if has(token, "key-"):
         s.key = after(token, "key-")
+        return true
+    return false
+
+# nebula1.0 Phase 2: `clip` -- see Style.clip's own field comment.
+def apply_clip_token(s: Style, token: str) -> bool:
+    if token == "clip":
+        s.clip = true
+        return true
+    return false
+
+# nebula1.0 Phase 2: `opacity-N` -- see Style.opacity_pct's own field
+# comment. Malformed/out-of-range values clamp rather than error, this
+# file's usual policy: a typo must never crash the renderer.
+def apply_opacity_token(s: Style, token: str) -> bool:
+    if has(token, "opacity-"):
+        mut v = after(token, "opacity-")
+        if Str.is_digit(v):
+            mut pct = Str.parse_int(v)
+            if pct < 0: pct = 0
+            if pct > 100: pct = 100
+            s.opacity_pct = pct
+        return true
+    return false
+
+# nebula1.0 Phase 2: `text-sm`/`text-base`/`text-lg` -- see
+# Style.font_size's own field comment. An unrecognized `text-*` value
+# (a typo, or a not-yet-supported size) leaves font_size at whatever it
+# already was rather than guessing -- same "malformed input degrades
+# safely" policy as the rest of this file, and here specifically it means
+# a typo renders at the STILL-CORRECT default size rather than some
+# arbitrary fallback.
+def apply_font_size_token(s: Style, token: str) -> bool:
+    if token == "text-sm":
+        s.font_size = font_size_sm()
+        return true
+    if token == "text-base":
+        s.font_size = font_size_base()
+        return true
+    if token == "text-lg":
+        s.font_size = font_size_lg()
         return true
     return false
 
@@ -698,6 +781,12 @@ pub def apply_utility(s: Style, token: str) -> void:
         return
 
     if apply_key_token(s, token):
+        return
+    if apply_clip_token(s, token):
+        return
+    if apply_opacity_token(s, token):
+        return
+    if apply_font_size_token(s, token):
         return
     if apply_grid_token(s, token):
         return

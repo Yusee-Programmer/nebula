@@ -90,6 +90,13 @@ extend FrameBuffer:
                 xx = xx + 1
             yy = yy + 1
 
+    # No blending here -- see canvas.tr's own comment on fill_rect_alpha for
+    # why this is always safe: a bare-metal target is genuinely write-only
+    # MMIO in the real (non-hosted-dev) case, so alpha is simply ignored
+    # and this paints fully opaque, exactly like fill_rect.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        self.fill_rect(x, y, w, h, color)
+
     pub def set_pixel(self, x: int, y: int, color: int) -> void:
         if x < 0:
             return

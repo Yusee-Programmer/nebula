@@ -1,0 +1,99 @@
+# toolkit.render.clipped_canvas — a Canvas that clips into a sub-rectangle.
+#
+# Proposal v4 / nebula1.0 Phase 2: nested "overflow: hidden" clip regions for
+# markup content. Before this, the only clipping in the toolkit was each
+# backend's own safety clamp (a fill_rect never writes outside the canvas's
+# own bounds) plus the one-level rectangular constraint render_into() gives a
+# whole sub-tree (step D) -- neither lets ONE PANEL inside an otherwise
+# unclipped tree cut off its own children's overflow.
+#
+# The fix is a Canvas that WRAPS another Canvas and intersects every
+# fill_rect/set_pixel against its own clip rect before forwarding. Every
+# existing rasterizer primitive (paint_rounded_rect_aa, draw_text, ...) is
+# already written only against fill_rect/set_pixel -- see toolkit/render/
+# canvas.tr's own header for why the interface stays exactly that small --
+# so NONE of them need to know clipping exists. A ClippedCanvas wrapping
+# ANOTHER ClippedCanvas composes for free: the inner one's own clamp still
+# applies when the outer one forwards to it, which is exactly what nested
+# clip regions need, with no explicit stack anywhere in this file.
+#
+# width()/height() deliberately return the WRAPPED canvas's own full size,
+# not the clip rect -- clipping is a paint-time restriction, not a layout
+# concept, and nothing here should make a clipped sub-tree believe its
+# viewport shrank.
+
+from toolkit.render.canvas import Canvas
+
+pub class ClippedCanvas implements Canvas:
+    pub inner: Canvas
+    pub clip_x: int
+    pub clip_y: int
+    pub clip_w: int
+    pub clip_h: int
+
+extend ClippedCanvas:
+    pub def init(inner: Canvas, x: int, y: int, w: int, h: int) -> ClippedCanvas:
+        mut c = ClippedCanvas()
+        c.inner = inner
+        c.clip_x = x
+        c.clip_y = y
+        c.clip_w = w
+        c.clip_h = h
+        return c
+
+    pub def width(self) -> int:
+        return self.inner.width()
+
+    pub def height(self) -> int:
+        return self.inner.height()
+
+    pub def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> void:
+        mut x0 = x
+        mut y0 = y
+        mut x1 = x + w
+        mut y1 = y + h
+        mut cx1 = self.clip_x + self.clip_w
+        mut cy1 = self.clip_y + self.clip_h
+        if x0 < self.clip_x: x0 = self.clip_x
+        if y0 < self.clip_y: y0 = self.clip_y
+        if x1 > cx1: x1 = cx1
+        if y1 > cy1: y1 = cy1
+        if x0 >= x1: return
+        if y0 >= y1: return
+        self.inner.fill_rect(x0, y0, x1 - x0, y1 - y0, color)
+
+    pub def set_pixel(self, x: int, y: int, color: int) -> void:
+        if x < self.clip_x: return
+        if y < self.clip_y: return
+        if x >= self.clip_x + self.clip_w: return
+        if y >= self.clip_y + self.clip_h: return
+        self.inner.set_pixel(x, y, color)
+
+    # Same rect-intersection as fill_rect, forwarded to the wrapped
+    # canvas's own fill_rect_alpha -- whether that ends up blending for
+    # real or falling back to opaque is entirely `inner`'s decision (see
+    # canvas.tr's own comment on fill_rect_alpha); a clip region is
+    # orthogonal to whether the backend underneath it can blend.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        mut x0 = x
+        mut y0 = y
+        mut x1 = x + w
+        mut y1 = y + h
+        mut cx1 = self.clip_x + self.clip_w
+        mut cy1 = self.clip_y + self.clip_h
+        if x0 < self.clip_x: x0 = self.clip_x
+        if y0 < self.clip_y: y0 = self.clip_y
+        if x1 > cx1: x1 = cx1
+        if y1 > cy1: y1 = cy1
+        if x0 >= x1: return
+        if y0 >= y1: return
+        self.inner.fill_rect_alpha(x0, y0, x1 - x0, y1 - y0, color, alpha)
+
+# A free function, not a call straight to ClippedCanvas.init: Tauraro
+# auto-upcasts a concrete Canvas backend to the interface at a FREE
+# FUNCTION's call site, not at a static method's — see toolkit.ui.interp's
+# render_to/register_handler for the same pattern and its own fuller
+# explanation. A caller doing `clip_canvas(my_sdl_canvas, ...)` upcasts
+# correctly; `ClippedCanvas.init(my_sdl_canvas, ...)` would not.
+pub def clip_canvas(inner: Canvas, x: int, y: int, w: int, h: int) -> ClippedCanvas:
+    return ClippedCanvas.init(inner, x, y, w, h)

@@ -6,8 +6,22 @@
 # trivially diffable and viewable.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
+from toolkit.types import red_of, green_of, blue_of, rgb
 from core.string import StringBuilder
 from io.file import File
+
+# Proposal v4 step B: the dev-loop PPM dump matches the extreme-tier
+# baseline -- no shadow, no GPU, no subpixel text -- on purpose, so what a
+# dev sees locally matches bare-metal/UEFI's capabilities rather than
+# SDL2's, EXCEPT alpha_blend: unlike a firmware framebuffer, this backend
+# is a plain RAM buffer this file already reads back (get_px, to_ppm), so
+# real read-blend-write translucency costs nothing extra to support here --
+# see fill_rect_alpha. See toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    mut c = Caps.baseline()
+    c.alpha_blend = true
+    return c
 
 pub class BufferCanvas implements Canvas:
     pub w: int
@@ -68,6 +82,56 @@ extend BufferCanvas:
             mut xx = x0
             while xx < x1:
                 self.px[row + xx] = color
+                xx = xx + 1
+            yy = yy + 1
+
+    # Real read-blend-write translucency: `alpha` (0-255) weights `color`
+    # against whatever is ALREADY in the buffer at each pixel -- unlike
+    # every other blend in this toolkit (paint_rounded_rect_aa and
+    # friends), which blends toward a caller-SUPPLIED ambient color because
+    # Canvas has no read-back, this backend genuinely reads its own buffer
+    # back (get_px already does, for to_ppm), so it can blend toward the
+    # REAL destination pixel instead. Same `+ 127` round-to-nearest reason
+    # as toolkit.ui.interp.mix_color's `+ 8` (see its own comment): biases
+    # every blended pixel toward the correct rounding rather than always
+    # down.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        if alpha >= 255:
+            self.fill_rect(x, y, w, h, color)
+            return
+        if alpha <= 0:
+            return
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+
+        mut x0 = x
+        mut y0 = y
+        mut x1 = x + w
+        mut y1 = y + h
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > self.w: x1 = self.w
+        if y1 > self.h: y1 = self.h
+        if x0 >= x1: return
+        if y0 >= y1: return
+
+        mut sr = red_of(color)
+        mut sg = green_of(color)
+        mut sb = blue_of(color)
+        mut inv = 255 - alpha
+
+        mut yy = y0
+        while yy < y1:
+            mut row = yy * self.w
+            mut xx = x0
+            while xx < x1:
+                mut dst = self.px[row + xx]
+                mut r = (sr * alpha + red_of(dst) * inv + 127) / 255
+                mut g = (sg * alpha + green_of(dst) * inv + 127) / 255
+                mut b = (sb * alpha + blue_of(dst) * inv + 127) / 255
+                self.px[row + xx] = rgb(r, g, b)
                 xx = xx + 1
             yy = yy + 1
 

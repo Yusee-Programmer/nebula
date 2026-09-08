@@ -20,8 +20,15 @@
 # grows.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
 from core.string import StringBuilder
 from core.vec import Vec
+
+# Proposal v4 step B: a plain RAM buffer streamed out as UART/PPM has no
+# alpha blending, no drop shadow, no GPU, no read-back, no subpixel text --
+# the floor every backend guarantees. See toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    return Caps.baseline()
 
 pub class FrameBuffer implements Canvas:
     pub w:  int
@@ -82,6 +89,13 @@ extend FrameBuffer:
                 self.px.set(row + xx, color)
                 xx = xx + 1
             yy = yy + 1
+
+    # No blending here -- see canvas.tr's own comment on fill_rect_alpha for
+    # why this is always safe: a bare-metal target is genuinely write-only
+    # MMIO in the real (non-hosted-dev) case, so alpha is simply ignored
+    # and this paints fully opaque, exactly like fill_rect.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        self.fill_rect(x, y, w, h, color)
 
     pub def set_pixel(self, x: int, y: int, color: int) -> void:
         if x < 0:

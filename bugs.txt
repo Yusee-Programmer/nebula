@@ -21,7 +21,13 @@ SEVERITY  High -- silent wrong values, no crash, no diagnostic.
 TARGETS   Any --freestanding build entered through `pub export def` rather
           than @entry/main. Confirmed on wasm32-freestanding; the same
           symptom was observed on x86_64-uefi.
-STATUS    Open. Worked around in every Nebula freestanding entry point.
+STATUS    FIXED 2026-09-08 (tauraroc). Every `pub export def` now carries a
+          shared, run-once guard: whichever exported function the host calls
+          first runs the module's global initializers before its own body,
+          so main()'s never-executed top-level-statement pass is no longer
+          the only path that sets them. Existing workarounds (treating
+          globals as zero and setting real defaults in a first-frame guard)
+          remain harmless but are no longer required in new code.
 
 REPRO
   mut plain_int: int   = 42
@@ -74,7 +80,10 @@ WORKAROUND
 SEVERITY  Medium -- clear link error, but names a symbol absent from source
           and only on one target.
 TARGETS   --target uefi-x64. Not hosted, not Cortex-M, not wasm.
-STATUS    Open (arguably a target gap, not a codegen bug). Worked around.
+STATUS    FIXED 2026-09-08 (tauraroc). The uefi-x64 turnkey build now passes
+          -mno-stack-arg-probe to the C compiler, exactly the "real fix"
+          named below -- no more split-per-family workaround needed for new
+          code (existing splits are harmless to leave as-is).
 
 REPRO
   One function with enough locals to cross a 4KB frame -- e.g. a long
@@ -109,7 +118,12 @@ WORKAROUND
 SEVERITY  Medium -- confusing error naming a runtime type the user never
           referenced.
 TARGETS   Any --freestanding build.
-STATUS    Open. Trivially avoidable once known.
+STATUS    FIXED 2026-09-08 (tauraroc). Each hook now routes through a
+          uniquely-named static-inline wrapper (`_tr_hook_calloc` etc, guarded
+          against the double-emission every hook already gets across
+          tauraro_types.h + main.c) instead of substituting the user's chosen
+          name straight into the macro body -- a hook can be named anything,
+          including a single letter, with no collision risk.
 
 REPRO
   @calloc
@@ -217,7 +231,15 @@ NOT BUGS -- language rules worth knowing (they cost time anyway)
 SEVERITY  High -- the documented way to read argv is unusable, and it is the
           first thing any CLI reaches for.
 TARGETS   All. Confirmed hosted (windows-x64).
-STATUS    Open. Workaround below is solid.
+STATUS    FIXED 2026-09-08 (tauraroc). `OS.args()` is now a real method
+          (std/sys/os.tr) wrapping the same `_tr_get_argc`/`_tr_get_arg`
+          primitives #6's workaround already used directly. The generated
+          C `main()` also no longer names its own params `argc`/`argv` --
+          renamed to `_tr_c_argc`/`_tr_c_argv` -- so a Tauraro local named
+          either one inside `main()` no longer collides with them either.
+          `_tr_get_arg` itself had a second, more serious bug found while
+          fixing this one -- see the new #9 below; both are needed together
+          for OS.args()/Env to be safe to use at all.
 
 REPRO
   from sys.os import OS
@@ -260,7 +282,17 @@ WORKAROUND
 SEVERITY  High -- the other documented argv path, and it takes the process
           down with no message.
 TARGETS   Hosted windows-x64, compiled to .exe.
-STATUS    Open, NOT root-caused. Avoid the class; use #6's workaround.
+STATUS    FIXED 2026-09-08 (tauraroc). Root-caused: `_tr_get_arg` returned a
+          BORROWED pointer straight into the process's real argv (owned by
+          the CRT, never malloc'd), but codegen uniformly wraps every
+          `-> str` extern result as OWNED and frees it later -- so the very
+          first release corrupted the heap. Fixed at the runtime level
+          (_tr_get_arg now returns a real owned copy via _tr_str_dup_owned,
+          matching every other `-> str` helper's existing contract) plus a
+          second, independent codegen bug found in the same investigation --
+          see new #9 below. `Env.init()`/`all_args()`/`user_args()` all now
+          work correctly; #6's raw-extern workaround is no longer necessary
+          but remains harmless.
 
 REPRO
   from sys.env import Env
@@ -297,7 +329,11 @@ WORKAROUND
 SEVERITY  High -- silently wrong strings, no diagnostic. Makes Windows paths
           impossible to write as literals.
 TARGETS   All. Confirmed hosted (windows-x64), `--run` and compiled.
-STATUS    Open. Worked around by using forward slashes everywhere.
+STATUS    FIXED 2026-09-08 (tauraroc). An unrecognized escape now keeps the
+          backslash literally (`"C:\Users\Home"` round-trips correctly)
+          instead of silently dropping it. Fixed in both `read_string` and
+          `read_byte_string`. The forward-slash workaround is no longer
+          necessary but remains harmless.
 
 REPRO
   def main():
@@ -335,3 +371,235 @@ WORKAROUND
   in paths. cli/nebula.tr builds every path this way for this reason.
   If a literal backslash is genuinely required, it cannot currently be
   written as a string literal at all.
+
+
+--------------------------------------------------------------------------
+#9  `List[str]`/`Vec[str]` .push()/.set()/.contains()/.index_of() silently
+    double-wrap-and-release a fresh str argument -- use-after-free
+--------------------------------------------------------------------------
+SEVERITY  High -- no diagnostic, and the corruption is timing-dependent
+          (garbage differs run to run, or doesn't reproduce at all depending
+          on what happens to be sitting in the freed memory).
+TARGETS   All. Found while fixing #6/#7; not something we'd hit a minimal
+          repro for by hand, but real code hits it constantly -- ANY direct
+          `.push(fresh_str_expr())` where the argument isn't first bound to
+          a local (an extern call, a method call, a string concat, etc).
+STATUS    FIXED 2026-09-08 (tauraroc). Root cause: the codegen for these four
+          List[str]/Vec[str] methods called a str-argument helper
+          (gen_args_strify) UNCONDITIONALLY, then overwrote its result with a
+          second, independent call for the str-list case -- but the first,
+          discarded call still had a side effect (it hoists a wrap/release
+          temp into shared codegen state). The argument expression got
+          evaluated and wrapped TWICE for one logical argument; both temps
+          got released, double-freeing whatever the wrapped string
+          ultimately pointed at. This is very likely the actual mechanism
+          behind #7 above, which does exactly this shape internally
+          (`result.push(_tr_get_arg(i))`).
+
+REPRO
+  extern "C":
+      def _tr_get_arg(n: int) -> str
+  def main():
+      mut v: Vec[str] = Vec[str].init(0)
+      v.push(_tr_get_arg(0))     # fresh extern-call result, not a local
+      print(v.get(0))
+
+OBSERVED
+  Garbage/truncated string, or a hard crash (STATUS_HEAP_CORRUPTION on
+  Windows) -- varies by run since it depends on what overwrites the freed
+  block before it's read back.
+
+WORKAROUND (no longer necessary, but harmless, and clarifies the shape)
+  Bind the argument to a local first, then push the local:
+      mut s = _tr_get_arg(0)
+      v.push(s)
+  This sidestepped the bug because a plain-local argument never went
+  through the discarded-then-recomputed path that only fires for a FRESH
+  (non-local) str expression.
+
+
+--------------------------------------------------------------------------
+#10  `from module import fn as alias` doesn't work for a free function
+--------------------------------------------------------------------------
+SEVERITY  Low -- clear compile error, easy one-line workaround, found in
+          passing while wiring proposal v4 step B (Caps flags) and not
+          chased further.
+TARGETS   All. Confirmed hosted (windows-x64).
+STATUS    FIXED 2026-09-08 (tauraroc). Root-caused and fixed in the compiler
+          (src/parser.tr) -- see CAUSE/FIX below. The unqualified-import
+          workaround still works and needs no reverting, but is no longer
+          required for new code.
+
+REPRO
+  # toolkit/render/desktop/sdl_canvas.tr exports:
+  #   pub def caps() -> Caps: ...
+  from toolkit.render.desktop.sdl_canvas import caps as sdl_caps
+  def main():
+      print(sdl_caps().shadows)
+
+OBSERVED
+  build/main.c:1630:17: error: implicit declaration of function 'sdl_caps'
+  build/main.c:1630:27: error: invalid type argument of '->' (have 'int')
+
+CAUSE
+  `ImportItem.alias` (src/ast.tr) was parsed correctly (`Name as Alias`) but
+  was NEVER READ anywhere except src/fmt.tr's source formatter, which just
+  echoes it back out. No resolver/sema/codegen pass ever bound the alias
+  name to anything -- so `from module import x as y` silently behaved
+  exactly like `from module import x`: only the ORIGINAL name `x` was ever
+  callable, matching bindgen's docs being right for EXTERN-bound symbols
+  (aliasing was never actually the mechanism there either -- likely a
+  different, coincidental path) while a plain Tauraro-defined free function
+  had no such luck.
+
+FIX
+  src/parser.tr: Parser gained an `import_aliases: Map[str, str]` field,
+  populated in the `from module import ... as alias` parse path (records
+  alias -> real name). Resolved at the CALL SITE, not via a broader
+  identifier rewrite: `parse_postfix`'s `Token.LParen` case rewrites a bare
+  `EIdent` callee to its real name immediately before building the `ECall`,
+  if it matches a registered alias. Deliberately narrow -- only "a plain
+  identifier immediately followed by `(`" is rewritten, so a local variable
+  or parameter that happens to share a name with some OTHER file's alias is
+  never touched (no scope/shadowing analysis needed). Works because
+  Tauraro's unity build already makes every imported module's real names
+  globally visible regardless of the import list (see the `from module
+  import *` feature) -- the alias only ever needed to become a synonym for
+  a name that was already reachable.
+
+WORKAROUND (no longer required, kept for reference)
+  Import the name unqualified and call it as-is:
+      from toolkit.render.desktop.sdl_canvas import caps
+      ...
+      caps().shadows
+
+
+--------------------------------------------------------------------------
+#11  Reading a class's `str` field into a local does not retain it -- the
+     local goes dangling once the owning object is replaced/freed
+--------------------------------------------------------------------------
+SEVERITY  High in principle (silent heap corruption, no crash, wrong data
+          returned later) -- LOW blast radius found in nebula so far,
+          because Interpreter.state's actual usage (proposal v4 step F)
+          never needs a node_key to outlive the frame that produced it: a
+          handler resolves and reads/writes state against the CURRENT
+          Interpreter.root before the next render() call replaces it, not
+          across renders. Found while writing step F's own regression test
+          (verified-examples/node_identity.tr), which held a node_key
+          across a render() specifically to prove structural stability --
+          that test now avoids the pattern (see WORKAROUND) rather than
+          exercising undefined behavior.
+TARGETS   Default (C) backend. Not tested against --backend native/llvm.
+STATUS    FIXED 2026-09-08 (tauraroc). Root-caused to the field-read
+          boundary (see CAUSE) and fixed in src/codegen/c.tr -- see FIX
+          below. Full gen1->gen2->gen3->gen4 self-host fixpoint verified
+          (converged at gen3<->gen4, byte-identical --emit c output; one
+          generation later than usual because the bug affected the OLD,
+          unfixed compiler's own compilation of the compiler's source,
+          which itself has this exact `mut x = obj.field` pattern
+          throughout), full tests/lang + tests/regression suite (17 files)
+          clean, all 37 examples/*.tr compile+run clean except two
+          confirmed PRE-EXISTING failures unrelated to this fix
+          (25_new_features.tr: unrelated Future-struct forward-declaration
+          ordering bug; ffi_callbacks.tr: unrelated missing-link-symbol
+          bug -- both reproduce identically on the pre-fix compiler).
+          nebula's own workaround (never hold a node_key/str-field value
+          across a render() boundary) remains correct and is NOT required
+          to be reverted -- it was always the right design regardless of
+          this fix (see verified-examples/node_identity.tr's own comment).
+
+REPRO (minimal, outside nebula)
+  pub class Node:
+      pub key: str
+  extend Node:
+      pub def init(k: str) -> Node:
+          mut n = Node()
+          n.key = k
+          return n
+  pub class Holder:
+      pub root: Node
+  extend Holder:
+      pub def init() -> Holder:
+          mut h = Holder()
+          h.root = Node.init("seed")
+          return h
+      pub def rebuild(self, base: str, idx: int) -> void:
+          mut k = base + "." + idx.to_str()
+          self.root = Node.init(k)
+  def main():
+      mut h = Holder.init()
+      h.rebuild("0", 0)
+      mut captured = h.root.key       # reads the str FIELD into a local
+      print("immediately: " + captured)          # "0.0" -- correct
+      mut junk: List[str] = []
+      mut i = 0
+      while i < 5000:                  # generate unrelated heap traffic
+          junk.append("junkjunkjunkjunkjunk" + i.to_str())
+          i = i + 1
+      h.rebuild("0", 0)                 # frees the OLD Node, incl. its key
+      print("after: " + captured)       # garbage ("captur" observed) --
+                                         # `captured` was never retained, so
+                                         # freeing the old Node's string and
+                                         # later allocations reusing that
+                                         # memory silently corrupt it.
+
+CAUSE
+  A companion repro proves the boundary precisely: keeping the WHOLE OLD
+  OBJECT alive via a second local (`mut old = h.root`, a class-typed
+  assignment) instead of just its field DOES protect `old.key` correctly
+  across the same rebuild + allocation storm -- class-typed local
+  assignment retains as expected. Only the narrower case -- a `str` FIELD
+  read out of a class instance and bound to a `str`-typed local --  fails
+  to retain. So the gap is specifically in str-field-read codegen, not
+  class ARC in general and not string ARC in general (plain string locals
+  and collection-stored strings are documented elsewhere as ARC-correct).
+
+  Precisely: src/codegen/c.tr's `str_retain_wrap` (the function that
+  decides whether a str-producing expression needs `_tr_str_retain()`
+  before being bound) only retained an `EPropAccess` (field-read) source
+  when `is_return` was true (a `-> str` return). The SLet/SAssign
+  first-declaration codegen paths (a fresh `mut x = obj.field`) call it
+  with `is_return=false`, so no retain ever happened there, AND the local
+  was explicitly excluded from `str_local_names` tracking (the "this local
+  owns a reference, release it at scope exit" bookkeeping) for exactly this
+  source shape -- both halves of ownership were skipped, consistent with
+  each other but wrong, since the field's owning object can be
+  replaced/freed independently of this local's lifetime.
+
+  The codebase had ALREADY found and fixed the identical gap once before,
+  but only for REASSIGNMENT (`x = obj.field` where `x` already exists) and
+  field-to-field STORES (`a.f = b.g`) -- both carry a comment tagged "#21"
+  explaining precisely this same UAF and manually retaining around it. The
+  fix was simply never extended to the first-declaration paths, which is
+  exactly what nebula's repro hit (`mut captured = h.root.key`).
+
+FIX
+  Applied the SAME "#21-style" manual retain used at the already-fixed
+  reassignment/field-store call sites to the two first-declaration paths
+  that were missing it (src/codegen/c.tr, HirStmt.SLet and HirStmt.SAssign
+  first-declare): when the RHS is an `EPropAccess`, wrap it in
+  `_tr_str_retain(...)` and register the new local in `str_local_names` so
+  it is released at scope exit like any other owned local (balancing the
+  new retain). `str_retain_wrap` itself was left unchanged -- editing it to
+  always retain would have double-retained at the already-patched
+  reassignment/field-store sites, which apply their own manual retain on
+  top of calling it.
+
+WORKAROUND (no longer required now the compiler is fixed, kept for
+context on why nebula's own code is still written this way)
+  Never hold a class's str field in a local past a point where the owning
+  object could be freed/replaced. Either:
+    (a) keep the owning object itself alive in a local (`mut old = obj`)
+        for as long as the field value is needed, since retain-on-class-
+        assignment does work, or
+    (b) re-read the field fresh from a still-live object instead of
+        carrying an old copy forward.
+  toolkit/ui/interp.tr's Interpreter.state (step F) never needs (a) or (b)
+  for its real use: a click handler reads/writes state against
+  Interpreter.root (still live) before the NEXT render() call ever runs,
+  so no field value is ever held across the render() boundary that would
+  free it. verified-examples/node_identity.tr's own structural-stability
+  check now compares two independently-built, simultaneously-alive
+  Interpreters instead of reusing one across two render() calls, and its
+  state-persistence check uses pattern (a) explicitly -- left as-is since
+  it was always the right design, not merely a bug workaround.

@@ -25,6 +25,10 @@
 #      antialiasing itself is unaffected -- it never needed alpha (it blends
 #      against a caller-supplied flat backdrop and writes one final solid
 #      color), which is exactly why it works identically on all four tiers.
+#      Formalized as a real, checkable fact rather than only this comment --
+#      toolkit.render.uefi.gop.caps().shadows is false here (proposal v4
+#      step B, toolkit/render/caps.tr); shared code should check that
+#      instead of assuming "not SDL2 means no shadow".
 #
 # The panel is CENTERED on whatever resolution the firmware reports, using the
 # markup's own `justify-center items-center` on a fixed-size child rather than

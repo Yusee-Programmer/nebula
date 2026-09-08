@@ -20,6 +20,13 @@
 # for row addressing instead of `width` or rows after the first will alias.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
+
+# Proposal v4 step B: a write-only, already-memory-mapped linear framebuffer
+# -- no alpha blending, no drop shadow, no GPU, no read-back, no subpixel
+# text. See toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    return Caps.baseline()
 
 pub class GopCanvas implements Canvas:
     pub fb:    Pointer[u32]
@@ -80,6 +87,12 @@ extend GopCanvas:
                     self.fb.offset(row + xx).write(cw)
                     xx = xx + 1
                 yy = yy + 1
+
+    # No blending -- a UEFI GOP framebuffer is genuinely write-only memory
+    # (see canvas.tr's own comment on fill_rect_alpha), so alpha is ignored
+    # and this paints fully opaque, exactly like fill_rect.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        self.fill_rect(x, y, w, h, color)
 
     pub def set_pixel(self, x: int, y: int, color: int) -> void:
         if x < 0:

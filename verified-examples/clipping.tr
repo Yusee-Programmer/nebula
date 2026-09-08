@@ -1,0 +1,68 @@
+# verified-examples/clipping.tr — nested "overflow: hidden" clip regions
+# (nebula1.0 Phase 2 / proposal v4 follow-on).
+#
+# A panel sized SMALLER than its child (an explicit w-10 h-10 box holding a
+# child explicitly sized w-20 h-20) overflows by construction -- flex's
+# place() never shrinks a child to fit, only positions it at the parent's
+# content-box origin. Without `clip`, the child paints past the panel's own
+# edge; with `clip`, nothing paints past it. Checks both a `clip` panel
+# (overflow cut off) and a plain panel (overflow visible, the baseline this
+# is a regression test against) so an accidental "clip always happens"
+# codegen bug would also be caught.
+#
+#   tauraroc --run verified-examples/clipping.tr
+
+from toolkit.ui.parser import UiParser
+from toolkit.ui.interp import Interpreter, render_to
+from toolkit.render.hosted.buffer import BufferCanvas
+
+mut _pass: int = 0
+mut _fail: int = 0
+
+def check_int(label: str, got: int, want: int) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def main():
+    mut W = 200
+    mut H = 200
+    mut bg = 0x1E293B
+
+    # clipped: a 40x40 (w-10 h-10) panel at the root's padded origin (16,16)
+    # holding an 80x80 (w-20 h-20) red child. The child's painted rect would
+    # be (16,16)-(96,96) without clipping; WITH clip it must stop at the
+    # panel's own (16,16)-(56,56).
+    mut clipped_src = "<panel \"p-4 bg-slate-800\">\n  <panel \"w-10 h-10 clip\">\n    <panel \"w-20 h-20 bg-red-500\" />\n  </panel>\n</panel>\n"
+    mut cp = UiParser.init()
+    mut ctree = cp.parse(clipped_src)
+    mut cit = Interpreter.init()
+    cit.root_bg = bg
+    mut ccanvas = BufferCanvas.init(W, H, bg)
+    render_to(cit, ctree, ccanvas)
+
+    check_int("clipped: inside the clip panel is red", ccanvas.get_px(30, 30), 0xEF4444)
+    check_int("clipped: just past the clip panel's edge is background, not red", ccanvas.get_px(70, 70), bg)
+    check_int("clipped: further past the (unclipped) child's own edge is also background", ccanvas.get_px(90, 90), bg)
+
+    # unclipped: same shapes, no `clip` token -- the child's overflow must
+    # be VISIBLE (the regression-test baseline: proves clip isn't a no-op
+    # that "clips" by accident regardless of the token).
+    mut plain_src = "<panel \"p-4 bg-slate-800\">\n  <panel \"w-10 h-10\">\n    <panel \"w-20 h-20 bg-red-500\" />\n  </panel>\n</panel>\n"
+    mut pp = UiParser.init()
+    mut ptree = pp.parse(plain_src)
+    mut pit = Interpreter.init()
+    pit.root_bg = bg
+    mut pcanvas = BufferCanvas.init(W, H, bg)
+    render_to(pit, ptree, pcanvas)
+
+    check_int("unclipped: inside the (undeclared) panel bounds is red", pcanvas.get_px(30, 30), 0xEF4444)
+    check_int("unclipped: past where the clip WOULD have cut is still red (overflow visible)", pcanvas.get_px(70, 70), 0xEF4444)
+    check_int("unclipped: up to the child's own actual edge is still red", pcanvas.get_px(90, 90), 0xEF4444)
+
+    print("")
+    print("passed=" + _pass.to_str() + " failed=" + _fail.to_str())
+    if _fail == 0:
+        print("ALL OK")

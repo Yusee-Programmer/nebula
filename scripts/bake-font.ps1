@@ -40,7 +40,15 @@ param(
     [string]$PreviewPng = "tools\fonts\preview.png",
     [int]$CellW = 8,
     [int]$CellH = 14,
-    [int]$Supersample = 4
+    [int]$Supersample = 4,
+    # nebula1.0 Phase 2 (multi-size fonts): every emitted `pub def` gets
+    # this suffix (e.g. "_sm"/"_lg"), so baking a second/third size into
+    # its OWN toolkit/text/font_data_<suffix>.tr does not collide with the
+    # base atlas's names under Tauraro's unity build (every module's `pub`
+    # names are globally visible regardless of what imported it -- see the
+    # `from module import *` feature note). Empty string (the default)
+    # reproduces the original, unsuffixed base-atlas names exactly.
+    [string]$Suffix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,9 +161,17 @@ for ($gi = 0; $gi -lt $count; $gi++) {
 
 $pgfx.Dispose()
 New-Item -ItemType Directory -Force (Split-Path $PreviewPng) | Out-Null
-$preview.Save($PreviewPng, [System.Drawing.Imaging.ImageFormat]::Png)
+# The preview PNG is a human-eyeballing convenience, not part of the baked
+# atlas -- a GDI+ save failure here (observed on this box for some preview
+# canvas sizes) must not block emitting the actual font_data.tr the toolkit
+# depends on.
+try {
+    $preview.Save($PreviewPng, [System.Drawing.Imaging.ImageFormat]::Png)
+    Write-Host "wrote preview: $PreviewPng"
+} catch {
+    Write-Host "WARNING: preview PNG save failed ($($_.Exception.Message)) -- continuing without it"
+}
 $preview.Dispose()
-Write-Host "wrote preview: $PreviewPng"
 
 $font.Dispose()
 $pfc.Dispose()
@@ -176,11 +192,11 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append("# Glyph index = codepoint - font_first_char(); byte offset = glyph_index *`n")
 [void]$sb.Append("# ($CellW * $CellH) + row * $CellW + col.`n")
 [void]$sb.Append("`n")
-[void]$sb.Append("pub def font_cell_w() -> int:`n    return $CellW`n`n")
-[void]$sb.Append("pub def font_cell_h() -> int:`n    return $CellH`n`n")
-[void]$sb.Append("pub def font_first_char() -> int:`n    return $first`n`n")
-[void]$sb.Append("pub def font_glyph_count() -> int:`n    return $count`n`n")
-[void]$sb.Append("pub def font_coverage() -> List[u8]:`n    return [")
+[void]$sb.Append("pub def font$($Suffix)_cell_w() -> int:`n    return $CellW`n`n")
+[void]$sb.Append("pub def font$($Suffix)_cell_h() -> int:`n    return $CellH`n`n")
+[void]$sb.Append("pub def font$($Suffix)_first_char() -> int:`n    return $first`n`n")
+[void]$sb.Append("pub def font$($Suffix)_glyph_count() -> int:`n    return $count`n`n")
+[void]$sb.Append("pub def font$($Suffix)_coverage() -> List[u8]:`n    return [")
 
 for ($i = 0; $i -lt $glyphBytes.Count; $i++) {
     if ($i -gt 0) { [void]$sb.Append(", ") }

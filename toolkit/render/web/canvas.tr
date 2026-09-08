@@ -35,7 +35,15 @@
 # exactly the kind of thing that looks like a palette bug three layers away.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
 from toolkit.types import red_of, green_of, blue_of
+
+# Proposal v4 step B: a raw WASM linear-memory buffer -- no alpha blending,
+# no drop shadow, no GPU, no read-back, no subpixel text (alpha is forced
+# opaque at the byte-repack step; see this file's own header). See
+# toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    return Caps.baseline()
 
 pub class WebCanvas implements Canvas:
     pub px: Pointer[u32]
@@ -101,6 +109,15 @@ extend WebCanvas:
                     self.px.offset(row + xx).write(packed)
                     xx = xx + 1
                 yy = yy + 1
+
+    # No blending here -- kept a safe opaque fallback like the other
+    # write-mostly backends (see canvas.tr's own comment on
+    # fill_rect_alpha). WASM linear memory IS technically readable by this
+    # code (unlike genuine firmware MMIO), so a real read-blend-write path
+    # is possible here in principle -- just not implemented yet; a real
+    # follow-up, not attempted in this pass.
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        self.fill_rect(x, y, w, h, color)
 
     pub def set_pixel(self, x: int, y: int, color: int) -> void:
         if x < 0:

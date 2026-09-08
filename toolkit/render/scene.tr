@@ -43,6 +43,20 @@ pub def cmd_rounded_box() -> int:
 pub def cmd_text() -> int:
     return 2
 
+# Proposal v4 / nebula1.0 Phase 2 (clipping): bracket commands, not a shape
+# to paint. execute_software/execute_diff track a clip STACK as they walk
+# the flat command list: push installs toolkit.render.clipped_canvas around
+# whatever canvas is currently active (x/y/w/h fields carry the new clip
+# rect, in the same absolute coordinate space every other command already
+# uses), pop restores the canvas active before the matching push. Kept as
+# ordinary Cmd values (all other fields unused/zero) rather than a second
+# variant kind, matching this file's existing "single tagged class" choice.
+pub def cmd_clip_push() -> int:
+    return 3
+
+pub def cmd_clip_pop() -> int:
+    return 4
+
 pub class Cmd:
     pub kind:     int
     pub x:        int
@@ -58,9 +72,33 @@ pub class Cmd:
     # (RASTERIZER.md 0), so this has to be carried, not sampled.
     pub ambient:  int
     pub text:     str
+    # nebula1.0 Phase 2: 0-255 (255 = fully opaque, the default every
+    # existing Cmd factory sets, so nothing that predates opacity changes
+    # behaviour). Only honoured for a PLAIN rect (radius<=0, border_w==0)
+    # today -- see toolkit.ui.interp.execute_software's own comment for
+    # why rounded/bordered opacity isn't attempted yet.
+    pub alpha:    int
+    # nebula1.0 Phase 2 (multi-size fonts): only meaningful for a cmd_text
+    # command -- which of the three baked atlases (toolkit.text.font's
+    # font_size_sm()/_base()/_lg(), the SAME numbers) to paint this label
+    # with. 1 (base) on every non-text command's factory below, where it is
+    # simply unused. This file cannot import toolkit.ui.style's identically-
+    # numbered constants without risking a cycle (same reason this file
+    # "imports nothing" -- see its own header), so the literal `1` here and
+    # `font_size_base()` there are two names for the same number, not two
+    # different defaults.
+    pub font_size: int
 
 extend Cmd:
     pub def rounded_rect(x: int, y: int, w: int, h: int, radius: int, fill: int, ambient: int) -> Cmd:
+        return Cmd.rounded_rect_alpha(x, y, w, h, radius, fill, ambient, 255)
+
+    # nebula1.0 Phase 2: like rounded_rect, but with an explicit alpha
+    # (0-255) instead of the implicit fully-opaque 255. A separate factory
+    # rather than a default parameter (Tauraro params are positional/
+    # required) -- rounded_rect stays the zero-churn call every PRE-opacity
+    # call site keeps using unchanged.
+    pub def rounded_rect_alpha(x: int, y: int, w: int, h: int, radius: int, fill: int, ambient: int, alpha: int) -> Cmd:
         mut c = Cmd()
         c.kind = cmd_rounded_rect()
         c.x = x
@@ -73,6 +111,8 @@ extend Cmd:
         c.stroke = 0
         c.ambient = ambient
         c.text = ""
+        c.alpha = alpha
+        c.font_size = 1
         return c
 
     pub def rounded_box(x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, stroke: int, ambient: int) -> Cmd:
@@ -88,9 +128,45 @@ extend Cmd:
         c.stroke = stroke
         c.ambient = ambient
         c.text = ""
+        c.alpha = 255
+        c.font_size = 1
         return c
 
-    pub def label(x: int, y: int, text: str, fg: int, ambient: int) -> Cmd:
+    pub def clip_push(x: int, y: int, w: int, h: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_clip_push()
+        c.x = x
+        c.y = y
+        c.w = w
+        c.h = h
+        c.radius = 0
+        c.border_w = 0
+        c.fill = 0
+        c.stroke = 0
+        c.ambient = 0
+        c.text = ""
+        c.alpha = 255
+        c.font_size = 1
+        return c
+
+    pub def clip_pop() -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_clip_pop()
+        c.x = 0
+        c.y = 0
+        c.w = 0
+        c.h = 0
+        c.radius = 0
+        c.border_w = 0
+        c.fill = 0
+        c.stroke = 0
+        c.ambient = 0
+        c.text = ""
+        c.alpha = 255
+        c.font_size = 1
+        return c
+
+    pub def label(x: int, y: int, text: str, fg: int, ambient: int, font_size: int) -> Cmd:
         mut c = Cmd()
         c.kind = cmd_text()
         c.x = x
@@ -102,7 +178,9 @@ extend Cmd:
         c.fill = fg
         c.stroke = 0
         c.ambient = ambient
+        c.alpha = 255
         c.text = text
+        c.font_size = font_size
         return c
 
 pub class Scene:
@@ -119,3 +197,45 @@ extend Scene:
 
     pub def len(self) -> int:
         return len(self.cmds)
+
+# Field-by-field equality (proposal v4 step I: diffing). Pure data comparison,
+# same charter as the rest of this file -- no rasterizer knowledge needed to
+# tell whether two commands would paint the same pixels.
+pub def cmd_eq(a: Cmd, b: Cmd) -> bool:
+    if a.kind != b.kind: return false
+    if a.x != b.x or a.y != b.y or a.w != b.w or a.h != b.h: return false
+    if a.radius != b.radius or a.border_w != b.border_w: return false
+    if a.fill != b.fill or a.stroke != b.stroke or a.ambient != b.ambient: return false
+    if a.alpha != b.alpha or a.font_size != b.font_size: return false
+    if a.text != b.text: return false
+    return true
+
+# True when `prev` and `curr` have the same command COUNT, so they can be
+# compared position-by-position (the tree shape didn't change between
+# frames -- same node count in, same command count out, since emit() is a
+# deterministic walk of the same tree structure). A count mismatch means a
+# conditional part of the tree grew or shrank; the caller should fall back
+# to a full repaint rather than compare mismatched positions.
+pub def scenes_diffable(prev: Scene, curr: Scene) -> bool:
+    return len(prev.cmds) == len(curr.cmds)
+
+# True if any command in the scene is a clip push/pop. execute_diff falls
+# back to a full repaint whenever this is true, the same "always correct,
+# just not optimized for that one frame" policy render_diff already uses
+# for a shape change -- see its own comment. A clipped command's on-screen
+# pixels depend on EVERY enclosing push's rect, not just its own unchanged
+# fields, so position-by-position cmd_eq alone cannot tell whether a
+# command that looks identical is still clipped the same way; skipping the
+# repaint of an unchanged-looking command whose clip rect actually moved
+# would leave stale pixels outside the new clip. Diffing clipped subtrees
+# correctly is a real, separate feature (clip-aware diffing), not attempted
+# here -- this only guarantees correctness, not the diffing speedup, for
+# any frame that uses clip.
+pub def scene_has_clip(s: Scene) -> bool:
+    mut i = 0
+    while i < len(s.cmds):
+        mut k = s.cmds[i].kind
+        if k == cmd_clip_push() or k == cmd_clip_pop():
+            return true
+        i = i + 1
+    return false

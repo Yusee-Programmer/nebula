@@ -119,3 +119,23 @@ extend Scene:
 
     pub def len(self) -> int:
         return len(self.cmds)
+
+# Field-by-field equality (proposal v4 step I: diffing). Pure data comparison,
+# same charter as the rest of this file -- no rasterizer knowledge needed to
+# tell whether two commands would paint the same pixels.
+pub def cmd_eq(a: Cmd, b: Cmd) -> bool:
+    if a.kind != b.kind: return false
+    if a.x != b.x or a.y != b.y or a.w != b.w or a.h != b.h: return false
+    if a.radius != b.radius or a.border_w != b.border_w: return false
+    if a.fill != b.fill or a.stroke != b.stroke or a.ambient != b.ambient: return false
+    if a.text != b.text: return false
+    return true
+
+# True when `prev` and `curr` have the same command COUNT, so they can be
+# compared position-by-position (the tree shape didn't change between
+# frames -- same node count in, same command count out, since emit() is a
+# deterministic walk of the same tree structure). A count mismatch means a
+# conditional part of the tree grew or shrank; the caller should fall back
+# to a full repaint rather than compare mismatched positions.
+pub def scenes_diffable(prev: Scene, curr: Scene) -> bool:
+    return len(prev.cmds) == len(curr.cmds)

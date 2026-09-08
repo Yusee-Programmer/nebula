@@ -34,7 +34,15 @@
 # uses the real, direct SDL.h bindings with no workarounds.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
 from toolkit.types import Event, red_of, green_of, blue_of
+
+# Proposal v4 step B: real alpha blending (draw_shadow below uses it) and
+# hardware acceleration -- bench_render.tr measured ACCELERATED|TARGETTEXTURE
+# (proposal-v4-renderer-architecture.md 5a). Still no destination read-back
+# or subpixel text through Canvas's own interface. See toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    return Caps.sdl2()
 from toolkit.render.desktop.sdl_bindings import SDL_Window, SDL_Renderer, SDL_Rect, SDL_Event, SDL_BlendMode
 from toolkit.render.desktop.sdl_bindings import SDL_Init, SDL_Quit, SDL_CreateWindow, SDL_CreateRenderer
 from toolkit.render.desktop.sdl_bindings import SDL_DestroyRenderer, SDL_DestroyWindow, SDL_PollEvent

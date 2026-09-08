@@ -306,20 +306,19 @@ step shippable and leaving the repo green:
 | | Step | Risk | Unblocks |
 |---|---|---|---|
 | ~~A~~ | ~~Probe SDL_GPU/SDL3~~ ✅ **done** | none | answered: dependency change, and not justified — see §5a |
-| **B** | `Caps` flags, wired to existing backends | low | honest shadow/alpha handling; no behaviour change |
+| ~~B~~ | ~~`Caps` flags, wired to existing backends~~ ✅ **done 2026-09-08** | low | honest shadow/alpha handling; no behaviour change |
 | ~~C~~ | ~~Scene graph + `execute_software()`~~ ✅ **done 2026-09-07** | medium | shipped; hosted PPMs byte-identical, all five tiers green |
 | ~~D~~ | ~~Sub-rect rendering~~ ✅ **done 2026-09-07** | low | shipped; `render_into()`, and the workaround is deleted from widgets_demo |
-| **E** | Grid layout | low | additive |
-| **F** | Node identity + state management | high | animation, real widgets in markup |
-| **G** | Animation + transitions | medium | needs F |
+| ~~E~~ | ~~Grid layout~~ ✅ **done 2026-09-08** | low | shipped; `measure_grid`/`place_grid` in toolkit/layout/flex.tr, verified grid_layout.tr |
+| ~~F~~ | ~~Node identity + state management~~ ✅ **done 2026-09-08** | high | shipped; `LayoutBox.node_key` (toolkit/layout/flex.tr build()) + `Interpreter.state` (toolkit/ui/interp.tr), verified node_identity.tr. Found+documented a real compiler gap along the way (bugs.txt #11: class str-field reads aren't retained) — worked around in nebula, not fixed in the compiler this session |
+| ~~G~~ | ~~Animation + transitions~~ ✅ **done 2026-09-08** | medium | shipped; `Interpreter.anim_toward` (generalizes Switch.tick()), wired into emit()'s hover/press darken, verified animation.tr |
 | ~~H~~ | Modern Renderer (SDL_GPU / WebGPU) — **deferred**, see §5a | high | nothing we have needs it |
-| **I** | Diffing on the scene graph | medium | needs C. The measured win, and it helps every tier |
+| ~~I~~ | ~~Diffing on the scene graph~~ ✅ **done 2026-09-07** | medium | shipped; `execute_diff`/`render_diff_to`, verified diff_render.tr — not yet wired into any real frame loop (see nebula1.0.md §6, Phase 1) |
 
-**Recommended start: ~~A~~ → ~~C~~ → ~~D~~ → I.** A, C and D are done. A removed H from the near-term
-plan, so the IR and what it unlocks is now the whole point. That order gets the IR in
-place, keeps every tier green, and pays off immediately: D removes a workaround that
-currently infects every widget demo, and I is the only change measured to help the
-tiers that are actually slow.
+**All of A–G and I are done; H remains deliberately deferred (§5a) and nothing
+measured since has changed that conclusion.** See nebula1.0.md §6 for the fuller
+status cross-check against that document's own Phase 1–4 list, including what's
+NOT done and why each of those gaps was left open rather than attempted.
 
 ---
 

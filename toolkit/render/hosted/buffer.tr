@@ -6,8 +6,16 @@
 # trivially diffable and viewable.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
 from core.string import StringBuilder
 from io.file import File
+
+# Proposal v4 step B: the dev-loop PPM dump matches the extreme-tier
+# baseline -- no alpha, no shadow, no GPU, no read-back, no subpixel text --
+# on purpose, so what a dev sees locally matches bare-metal/UEFI's
+# capabilities rather than SDL2's. See toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    return Caps.baseline()
 
 pub class BufferCanvas implements Canvas:
     pub w: int

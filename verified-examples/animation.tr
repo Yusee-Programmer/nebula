@@ -1,0 +1,117 @@
+# verified-examples/animation.tr — hover-darken easing (proposal v4, step G).
+#
+# Generalizes toolkit.ui.checkbox/switch.Switch.tick()'s hand-rolled "step
+# a value toward its target by a fixed amount per call" pattern into
+# Interpreter.anim_toward, keyed by the node identity step F added, and
+# wires it into the ONE place every markup-driven widget already gets
+# hover/press feedback (toolkit.ui.interp.emit) -- proving step G actually
+# needs step F, not just that the two shipped in the same session.
+#
+# Checks the three things that make "eases" a real claim rather than a
+# cosmetic comment:
+#   1. The FIRST hovered frame is only PARTWAY darkened, not snapped fully
+#      dark in one frame (step 5 of a target-15 climb).
+#   2. Enough frames later it reaches the steady-state fully-dark color,
+#      and holds there (further frames don't overshoot or oscillate).
+#   3. Moving the pointer away eases back OUT, ending up at EXACTLY the
+#      original color again (not off by the rounding a naive percentage
+#      darken/undarken round-trip could leave behind).
+#
+#   tauraroc --run verified-examples/animation.tr
+
+from toolkit.ui.parser import UiParser
+from toolkit.ui.interp import Interpreter, render_to
+from toolkit.render.hosted.buffer import BufferCanvas
+from toolkit.types import rgb, red_of, green_of, blue_of
+
+mut _pass: int = 0
+mut _fail: int = 0
+
+def check_int(label: str, got: int, want: int) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def check_bool(label: str, got: bool, want: bool) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def noop(e):
+    pass
+
+def main():
+    mut W = 200
+    mut H = 200
+    mut base_color = 0xF59E0B
+
+    mut src = "<panel \"p-4 bg-slate-800\">\n  <panel \"w-40 h-40 bg-amber-500\" @on_click(noop) />\n</panel>\n"
+    mut p = UiParser.init()
+    mut tree = p.parse(src)
+
+    mut it = Interpreter.init()
+    it.root_bg = 0x1E293B
+    mut canvas = BufferCanvas.init(W, H, 0x1E293B)
+
+    # Frame 0, unhovered: establishes the "resting" baseline in state (an
+    # unset key starts AT its target, so hovering from a node's very first
+    # frame ever would have no prior resting value to animate away from --
+    # not what this checks; a node that has been resting and THEN gets
+    # hovered is the real, common case).
+    it.hover_x = 0 - 1
+    it.hover_y = 0 - 1
+    render_to(it, tree, canvas)
+    check_int("frame 0 (unhovered) is exactly the base color", canvas.get_px(30, 30), base_color)
+
+    it.hover_x = 30
+    it.hover_y = 30
+
+    render_to(it, tree, canvas)
+    mut frame1 = canvas.get_px(30, 30)
+    check_bool("frame 1 is darkened from base (hover started easing in)", frame1 != base_color, true)
+    check_bool("frame 1 is NOT yet the fully-dark steady state (one step of five)", frame1 != darken15(base_color), true)
+
+    # 15 / step(5) = 3 steps to fully settle; give it a couple extra frames
+    # to also prove it HOLDS once there rather than overshooting past the
+    # target and oscillating.
+    render_to(it, tree, canvas)
+    render_to(it, tree, canvas)
+    mut settled = canvas.get_px(30, 30)
+    check_int("settles to exactly the 15%-darkened steady state", settled, darken15(base_color))
+
+    render_to(it, tree, canvas)
+    mut still_settled = canvas.get_px(30, 30)
+    check_int("holds at the steady state on further frames (no overshoot/oscillation)", still_settled, settled)
+
+    # Move the pointer away: it must ease back OUT, and land on EXACTLY the
+    # original color once it's had enough frames to fully return.
+    it.hover_x = 0 - 1
+    it.hover_y = 0 - 1
+    render_to(it, tree, canvas)
+    mut leaving = canvas.get_px(30, 30)
+    check_bool("first frame after leaving is still darker than base (easing out, not snapping)", leaving != base_color, true)
+
+    render_to(it, tree, canvas)
+    render_to(it, tree, canvas)
+    mut returned = canvas.get_px(30, 30)
+    check_int("eases all the way back to the EXACT original color, no residual offset", returned, base_color)
+
+    print("")
+    print("passed=" + _pass.to_str() + " failed=" + _fail.to_str())
+    if _fail == 0:
+        print("ALL OK")
+
+# Mirrors toolkit.ui.interp.darken_color's own integer math exactly (same
+# formula, same red_of/green_of/blue_of/rgb helpers it uses), so the
+# expected value in this test is computed the same way production code
+# computes it rather than an independently-rounded approximation that could
+# disagree by a channel or two.
+def darken15(color: int) -> int:
+    mut r = red_of(color) * 85 / 100
+    mut g = green_of(color) * 85 / 100
+    mut b = blue_of(color) * 85 / 100
+    return rgb(r, g, b)

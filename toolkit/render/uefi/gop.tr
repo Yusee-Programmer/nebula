@@ -20,6 +20,13 @@
 # for row addressing instead of `width` or rows after the first will alias.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.caps import Caps
+
+# Proposal v4 step B: a write-only, already-memory-mapped linear framebuffer
+# -- no alpha blending, no drop shadow, no GPU, no read-back, no subpixel
+# text. See toolkit/render/caps.tr.
+pub def caps() -> Caps:
+    return Caps.baseline()
 
 pub class GopCanvas implements Canvas:
     pub fb:    Pointer[u32]

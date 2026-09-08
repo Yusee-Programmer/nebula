@@ -13,7 +13,7 @@
 from toolkit.types import Event, EventHandler, event_name_for_kind, ev_key, rgb, red_of, green_of, blue_of
 from toolkit.ui.ast import UiNode, max_depth
 from toolkit.ui.style import StyleCache, unset
-from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text
+from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text, cmd_eq, scenes_diffable
 from toolkit.layout.flex import LayoutBox, layout_tree, layout_tree_at, kind_text
 from toolkit.render.canvas import Canvas
 from toolkit.text.font import Font
@@ -32,6 +32,13 @@ pub class Interpreter:
     pub root:     LayoutBox
     pub has_root: bool
     pub renders:  int
+    # Proposal v4 step I (diffing): the PREVIOUS frame's scene, kept around so
+    # render_diff() can skip repainting whatever didn't change. Only touched
+    # by render_diff() -- render()/render_rect() never read or write these,
+    # so calling render() after render_diff() (or never calling render_diff()
+    # at all) behaves exactly as before.
+    pub last_scene:     Scene
+    pub has_last_scene: bool
     # Native-like button feedback: any box with a non-empty event_name (i.e.
     # anything a UI author wired to `@on_click(...)`) darkens on hover, darker
     # still while pressed -- callers set these from their own per-frame input
@@ -47,6 +54,15 @@ pub class Interpreter:
     # background; set it directly if a caller clears its canvas to something
     # else, the same way each widget's own `page_bg` field works.
     pub root_bg:  int
+    # Proposal v4 step F: per-node state, keyed by LayoutBox.node_key. THIS
+    # is what survives a re-render -- the Interpreter itself is a long-lived
+    # host object (one per screen/view, created once), unlike self.root,
+    # which is thrown away and rebuilt from scratch on every render() call.
+    # A plain int store rather than a variant/union: every stateful widget
+    # this toolkit has today (checked, focused, scroll offset, drag-in-
+    # progress) is representable as one int, and a second typed store can be
+    # added later without disturbing this one if that stops being true.
+    pub state:    Dict[str, int]
 
 extend Interpreter:
     pub def init() -> Interpreter:
@@ -56,11 +72,67 @@ extend Interpreter:
         it.handlers = []
         it.has_root = false
         it.renders = 0
+        it.last_scene = Scene.init()
+        it.has_last_scene = false
         it.hover_x = 0 - 1
         it.hover_y = 0 - 1
         it.pressed = false
         it.root_bg = 0x0B1120
+        it.state = {}
         return it
+
+    # Proposal v4 step F: read a node's persisted state, or `default` if
+    # nothing has been stored under that key yet (the first frame a widget
+    # exists, or any key nothing ever wrote to). `key` is a LayoutBox's
+    # `node_key` -- see toolkit.layout.flex's build() for how that is
+    # derived and why it is stable across the rebuild render() does every
+    # frame.
+    pub def state_get(self, key: str, default: int) -> int:
+        if key in self.state:
+            return self.state[key]
+        return default
+
+    pub def state_set(self, key: str, val: int) -> void:
+        self.state[key] = val
+
+    # Convenience for the common boolean-toggle case (checkbox/switch
+    # `checked`, expander `open`, ...): reads the current value (or
+    # `default` if unset), flips between 0 and 1, stores and returns the
+    # new value -- one call from an `@on_click` handler instead of a
+    # get-then-set pair at every call site.
+    pub def state_toggle(self, key: str, default: int) -> int:
+        mut cur = self.state_get(key, default)
+        mut next = 1
+        if cur != 0:
+            next = 0
+        self.state_set(key, next)
+        return next
+
+    # Proposal v4 step G: one step of a linear animation toward `target`,
+    # stored under `key` in the same state map step F added -- the exact
+    # generalization of toolkit.ui.checkbox/switch.Switch.tick()'s hand-
+    # rolled "step knob_pos toward target by a fixed amount per call"
+    # pattern, made reusable for ANY node's ANY int-valued property instead
+    # of one hardcoded field on one hand-written class. Call once per frame
+    # (once per emit() call is once per frame, by construction) with the
+    # same target and step; returns the new current value to paint with.
+    #
+    # An unset key starts already AT `target`, not at 0 -- the same choice
+    # Switch.init() makes (knob_pos starts snapped to its initial on/off
+    # state) so a node's first-ever frame never animates in from a bogus
+    # zero value it was never actually at.
+    pub def anim_toward(self, key: str, target: int, step: int) -> int:
+        mut cur = self.state_get(key, target)
+        if cur < target:
+            cur = cur + step
+            if cur > target:
+                cur = target
+        elif cur > target:
+            cur = cur - step
+            if cur < target:
+                cur = target
+        self.state_set(key, cur)
+        return cur
 
     # Takes an already-interface-typed handler; callers should go through the
     # free function register_handler() below so the upcast happens without a move.
@@ -113,6 +185,36 @@ extend Interpreter:
         mut scene = self.build_scene(ambient)
         execute_software(scene, c, self.font)
 
+    # Proposal v4 step I: like render(), but repaints only the commands that
+    # actually changed since the last render_diff() call on this Interpreter
+    # (measured as the change that helps every tier, including the ones with
+    # no GPU to fall back on -- see proposal-v4-renderer-architecture.md 5a).
+    #
+    # A NEW method rather than a change to render()'s own behavior: skipping
+    # unchanged commands is only correct if the caller ALSO stops clearing
+    # the canvas every frame (a clear erases the very pixels this is meant to
+    # leave alone), which is a caller-side contract change every existing
+    # example/backend would need to adopt. render() stays exactly as it was
+    # so nothing already shipping is at risk; render_diff() is opt-in for a
+    # frame loop that clears ONCE up front and calls this every frame after.
+    #
+    # Falls back to a full repaint (execute_software) whenever there is no
+    # previous scene yet, or the tree's SHAPE changed since last frame (a
+    # conditional part of the tree grew/shrank, so commands no longer line
+    # up index-for-index with last frame's) -- always correct, just not
+    # optimized for that one frame.
+    pub def render_diff(self, node: Pointer[UiNode], c: Canvas) -> void:
+        self.root = layout_tree(node, self.cache, c.width(), c.height())
+        self.has_root = true
+        self.renders = self.renders + 1
+        mut scene = self.build_scene(self.root_bg)
+        if self.has_last_scene and scenes_diffable(self.last_scene, scene):
+            execute_diff(self.last_scene, scene, c, self.font)
+        else:
+            execute_software(scene, c, self.font)
+        self.last_scene = scene
+        self.has_last_scene = true
+
     # `ambient_bg` is the flat color already sitting behind THIS box, before
     # anything below paints over it -- the canvas clear color at the root,
     # cascading down as each panel's own resolved background for its
@@ -141,13 +243,26 @@ extend Interpreter:
         # Native-like hover/pressed feedback: only for boxes an author wired
         # to an event (event_name != "") -- a plain decorative panel never
         # darkens just because the cursor happens to be over it.
+        #
+        # Proposal v4 step G: the darken amount EASES toward its target
+        # (0 / 15 / 30) via anim_toward rather than snapping to it in one
+        # frame -- a "#hover" suffix on the node's own node_key keeps this
+        # animation-internal bookkeeping out of the same namespace a host
+        # or a future native widget uses for its own state (state_get/set
+        # on the bare node_key). Every existing hosted/SDL2/UEFI/bare-metal
+        # example that reads hover_x/y already calls render()/render_diff()
+        # every frame, so this needs no new call anywhere -- the eased value
+        # is just what those calls now compute.
         mut is_hot = box.event_name != "" and box.contains(self.hover_x, self.hover_y)
+        mut target_pct = 0
+        if is_hot:
+            target_pct = 15
+            if self.pressed:
+                target_pct = 30
+        mut pct = self.anim_toward(box.node_key + "#hover", target_pct, 5)
         mut bg = box.style.bg
         mut border = box.style.border
-        if is_hot:
-            mut pct = 15
-            if self.pressed:
-                pct = 30
+        if pct > 0:
             if bg != unset():
                 bg = darken_color(bg, pct)
             if border != unset():
@@ -791,6 +906,14 @@ pub def render_to(it: Interpreter, node: Pointer[UiNode], c: Canvas) -> void:
 pub def render_into(it: Interpreter, node: Pointer[UiNode], c: Canvas, x: int, y: int, w: int, h: int, ambient: int) -> void:
     it.render_rect(node, c, x, y, w, h, ambient)
 
+# Same reason this is a free function as render_to/render_into: a concrete
+# backend (SdlCanvas, GopCanvas, ...) upcasts to Canvas automatically at a
+# free function's call site, not at a method's -- so a real frame loop calls
+# THIS, not it.render_diff(...) directly, the same way it already calls
+# render_to rather than it.render(...).
+pub def render_diff_to(it: Interpreter, node: Pointer[UiNode], c: Canvas) -> void:
+    it.render_diff(node, c)
+
 # Replays a scene onto any Canvas, using the same rasterizer primitives the
 # interpreter used to call directly. This is the whole compatibility story
 # for the scene graph: BufferCanvas, FrameBuffer, GopCanvas, WebCanvas and
@@ -810,4 +933,35 @@ pub def execute_software(scene: Scene, c: Canvas, font: Font) -> void:
             paint_rounded_box_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
         elif cmd.kind == cmd_text():
             draw_text(c, font, cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
+        i = i + 1
+
+# Proposal v4 step I: like execute_software, but skips any command that's
+# identical to the SAME position in `prev` -- the pixels it would paint are
+# already on the canvas from last frame, since render_diff() (the only
+# caller) never lets the canvas be cleared between calls. Caller must have
+# already confirmed scenes_diffable(prev, curr) (same command count); this
+# does not re-check it, so an out-of-bounds prev.cmds[i] is a caller bug,
+# not a runtime possibility it needs to defend against here.
+#
+# KNOWN LIMITATION, not yet reachable: a changed TEXT command repaints only
+# the new string's own pixels, over whatever the old string already painted
+# -- correct as long as the new text is at least as wide as the old text
+# (true for every current use: hover/press only ever changes a command's
+# COLOR fields, never .text), but would leave stray pixels ("ghosting") from
+# a wider old string if text content itself ever became dynamic per frame.
+# Cmd.label() always sets w=0/h=0 (labels aren't boxes), so there's no
+# stored width to clear even if this needed to. Revisit when proposal step F
+# (node identity + state) lands real per-frame-changing text content.
+pub def execute_diff(prev: Scene, curr: Scene, c: Canvas, font: Font) -> void:
+    mut i = 0
+    while i < len(curr.cmds):
+        mut cmd = curr.cmds[i]
+        mut prev_cmd = prev.cmds[i]
+        if not cmd_eq(prev_cmd, cmd):
+            if cmd.kind == cmd_rounded_rect():
+                paint_rounded_rect_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.fill, cmd.ambient)
+            elif cmd.kind == cmd_rounded_box():
+                paint_rounded_box_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
+            elif cmd.kind == cmd_text():
+                draw_text(c, font, cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
         i = i + 1

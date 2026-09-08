@@ -31,6 +31,7 @@ from toolkit.ui.parser import UiParser
 from toolkit.ui.interp import Interpreter, render_to, render_into, register_handler, paint_rounded_rect_aa, draw_text
 from toolkit.ui.ast import UiNode
 from toolkit.render.desktop.sdl_canvas import SdlCanvas, poll_event, last_click, last_key, last_wheel_delta, mouse_state
+from toolkit.render.desktop.sdl_canvas import caps
 from toolkit.render.desktop.sdl_bindings import SDL_Delay
 from toolkit.render.canvas import Canvas
 from toolkit.text.font import Font
@@ -248,7 +249,15 @@ def main():
             # covering everything but the soft edge peeking out past the
             # card's own rect) -- not painted after, which would draw it OVER
             # the card instead of behind it.
-            canvas.draw_shadow(16, 16, 428, 64, 12)
+            #
+            # Proposal v4 step B: gated on Caps.shadows rather than assuming
+            # every Canvas has draw_shadow. This demo is SDL2-only today, so
+            # the check is always true here -- but it's the pattern any
+            # future shared (backend-agnostic) code should follow instead of
+            # hardcoding "SDL2 means shadows work", the assumption this exact
+            # call site used to bake in silently.
+            if caps().shadows:
+                canvas.draw_shadow(16, 16, 428, 64, 12)
             render_to(it, chrome_tree, canvas)
 
             tabs.paint(canvas, tx, ty, tw, th)

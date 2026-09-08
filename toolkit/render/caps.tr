@@ -1,0 +1,52 @@
+# toolkit.render.caps — capability flags: what THIS target's Renderer supports.
+#
+# Proposal v4 step B. The problem this formalizes is already real:
+# `SdlCanvas.draw_shadow` exists and `GopCanvas` has no equivalent, and until
+# now the CALLER was expected to just know that -- `examples/uefi_demo/
+# render_widgets.tr` documents "no drop shadow" in a comment instead of the
+# code being able to ask.
+#
+# Rule: the baseline (Caps.baseline()) is guaranteed by every backend.
+# Enhancements are opt-in and degrade SILENTLY -- a shadow on a renderer
+# without `.shadows` is skipped, not emulated badly and not an error. That
+# is exactly how the toolkit already treats an unknown style token, so it's
+# a consistent rule rather than a new one.
+#
+# Deliberately NOT a Canvas interface method: Canvas stays the four methods
+# every backend (including a write-only MMIO/GOP framebuffer) can implement
+# for free (see canvas.tr's own header on why that interface stays small).
+# Caps is a separate, per-backend-module query -- `caps()` lives next to
+# each concrete Canvas type, the same way `draw_shadow` already does.
+
+pub class Caps:
+    pub alpha_blend:   bool   # can composite; a GOP/MMIO framebuffer cannot
+    pub shadows:       bool   # a drop-shadow primitive exists on this backend
+    pub gpu:           bool   # hardware-accelerated (bench_render.tr, prop. v4 5a)
+    pub read_back:     bool   # can sample its own destination pixels
+    pub subpixel_text: bool   # subpixel (not just whole-pixel) text AA
+
+extend Caps:
+    pub def init(alpha_blend: bool, shadows: bool, gpu: bool, read_back: bool, subpixel_text: bool) -> Caps:
+        mut c = Caps()
+        c.alpha_blend = alpha_blend
+        c.shadows = shadows
+        c.gpu = gpu
+        c.read_back = read_back
+        c.subpixel_text = subpixel_text
+        return c
+
+    # The floor every Canvas backend guarantees today: no alpha, no shadows,
+    # no GPU, no destination read-back, no subpixel text. Exactly what a
+    # write-only framebuffer can promise -- which is why Canvas's own
+    # 4-method interface has no alpha channel or read-back at all (see
+    # canvas.tr). GopCanvas, FrameBuffer (bare-metal), WebCanvas, and
+    # BufferCanvas (hosted) all report this.
+    pub def baseline() -> Caps:
+        return Caps.init(false, false, false, false, false)
+
+    # SdlCanvas: real alpha blending (draw_shadow uses it) and hardware
+    # acceleration -- bench_render.tr measured ACCELERATED|TARGETTEXTURE
+    # (proposal-v4 5a). Still no destination read-back or subpixel text
+    # through Canvas's own interface.
+    pub def sdl2() -> Caps:
+        return Caps.init(true, true, true, false, false)

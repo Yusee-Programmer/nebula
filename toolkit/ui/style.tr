@@ -47,6 +47,13 @@ pub def dir_row() -> int:
 pub def dir_col() -> int:
     return 1
 
+# Proposal v4 step E. A grid container ignores `justify`/`align`/`grow` (the
+# flex-only distribution model) and instead wraps children into `grid_cols`
+# equal-width columns, row-major, with each row's height fit to its tallest
+# child -- see toolkit/layout/flex.tr's measure_grid/place_grid.
+pub def dir_grid() -> int:
+    return 2
+
 # Alignment values, shared by both axes -- `justify` positions children along
 # the main axis, `align` along the cross axis, exactly as CSS flexbox does.
 # `align_stretch` is cross-axis only (a child with no explicit cross size
@@ -117,6 +124,19 @@ pub class Style:
     pub radius:   int   # px corner radius, 0 = square corners
     pub justify:  int   # main-axis distribution  (justify-*)
     pub align:    int   # cross-axis alignment    (items-*)
+    # Proposal v4 step E: column count for a `dir_grid()` container
+    # (`grid-cols-N`). Meaningless for row/col direction. 0 = not set;
+    # toolkit.layout.flex's measure_grid/place_grid treat anything < 1 as 1
+    # column, the same "malformed input degrades safely" policy as the rest
+    # of this file.
+    pub grid_cols: int
+    # Proposal v4 step F: explicit node identity (`key-<name>`). "" means
+    # "no explicit key" -- toolkit.layout.flex's build() falls back to a
+    # structural (tree-position) key in that case. An explicit key is what
+    # keeps identity (and therefore state) attached to the right logical
+    # item when a list of otherwise-identical siblings gets reordered; see
+    # that file's own comment on build() for the full mechanism.
+    pub key: str
 
 extend Style:
     pub def default() -> Style:
@@ -146,6 +166,8 @@ extend Style:
         s.radius   = 0
         s.justify  = align_start()
         s.align    = align_stretch()
+        s.grid_cols = 0
+        s.key      = ""
         return s
 
     pub def copy(self) -> Style:
@@ -175,10 +197,12 @@ extend Style:
         s.radius   = self.radius
         s.justify  = self.justify
         s.align    = self.align
+        s.grid_cols = self.grid_cols
+        s.key      = self.key
         return s
 
     pub def to_str(self) -> str:
-        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + ")"
+        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + " grid_cols=" + self.grid_cols.to_str() + " key=" + self.key + ")"
 
 def hex_digit_val(c: str) -> int:
     if c == "0": return 0
@@ -306,6 +330,30 @@ def has(token: str, prefix: str) -> bool:
 
 def after(token: str, prefix: str) -> str:
     return Str.slice(token, Str.len(prefix), Str.len(token))
+
+# Proposal v4 step E: grid direction + column count. A separate function
+# rather than folded into apply_flex_token, per this file's own __chkstk
+# lesson above -- a new token family is a new function, not a sixth family
+# inlined into an existing one.
+def apply_grid_token(s: Style, token: str) -> bool:
+    if token == "grid":
+        s.dir = dir_grid()
+        return true
+    if has(token, "grid-cols-"):
+        mut v = after(token, "grid-cols-")
+        if Str.is_digit(v):
+            s.grid_cols = Str.parse_int(v)
+        return true
+    return false
+
+# Proposal v4 step F: explicit node identity (`key-<name>`). A separate
+# function for the same __chkstk reason apply_grid_token is: a new token
+# family is a new function, not another branch folded into an existing one.
+def apply_key_token(s: Style, token: str) -> bool:
+    if has(token, "key-"):
+        s.key = after(token, "key-")
+        return true
+    return false
 
 def set_pad_all(s: Style, v: int) -> void:
     s.pad_t = v
@@ -649,6 +697,10 @@ pub def apply_utility(s: Style, token: str) -> void:
             s.mar_l = b_l - (s.mar_l - b_l)
         return
 
+    if apply_key_token(s, token):
+        return
+    if apply_grid_token(s, token):
+        return
     if apply_flex_token(s, token):
         return
     if apply_edge_token(s, token):

@@ -1,0 +1,133 @@
+# verified-examples/component_model.tr — component model (proposal v5).
+#
+# A `Card` template with a `{title}` prop, a named "header" slot and a
+# default slot, instantiated twice at different tree positions with
+# different props/children. Checks the claims proposal-v5-components.md
+# makes: prop substitution reaches both a class string and a text body; an
+# unfilled named slot contributes zero nodes without crashing; default-slot
+# children land in the right position; the two instances get distinct
+# positional node_keys with no change to node_key's own mechanism; and a
+# template with no slots at all still round-trips unchanged.
+#
+#   tauraroc --run verified-examples/component_model.tr
+
+from toolkit.ui.parser import UiParser
+from toolkit.ui.ast import UiNode, new_text, box_node, read_node
+from toolkit.ui.component import instantiate, one_slot, no_props
+from toolkit.ui.interp import Interpreter, render_to
+from toolkit.render.hosted.buffer import BufferCanvas
+
+mut _pass: int = 0
+mut _fail: int = 0
+
+def check_str(label: str, got: str, want: str) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got \"" + got + "\" want \"" + want + "\"")
+
+def check_bool(label: str, got: bool, want: bool) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def check_int(label: str, got: int, want: int) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def main():
+    mut W = 200
+    mut H = 200
+
+    # `header` is a NAMED slot, the default `<slot/>` is the card body.
+    mut card_src = "<panel \"flex-col p-2 bg-slate-700 rounded-lg gap-1\">\n  <panel \"flex-row items-center gap-1\">\n    <text \"text-white text-lg\">{title}</text>\n    <slot \"header\"/>\n  </panel>\n  <slot/>\n</panel>\n"
+    mut cp = UiParser.init()
+    mut card_tpl = cp.parse(card_src)
+    check_bool("card template parses with no errors", cp.ok(), true)
+
+    # First instance: fills BOTH slots, title "Settings".
+    mut props1: Dict[str, str] = {}
+    props1["title"] = "Settings"
+    mut header1: List[Pointer[UiNode]] = [new_text("text-xs text-slate-400", "beta")]
+    mut body1: List[Pointer[UiNode]] = [new_text("text-white", "General options")]
+    mut slots1 = one_slot(body1)
+    slots1["header"] = header1
+    mut card1 = instantiate(card_tpl, slots1, props1)
+
+    # Second instance: fills only the default slot, title "About" -- the
+    # named "header" slot is deliberately left UNFILLED.
+    mut props2: Dict[str, str] = {}
+    props2["title"] = "About"
+    mut body2: List[Pointer[UiNode]] = [new_text("text-white", "Nebula v1")]
+    mut card2 = instantiate(card_tpl, one_slot(body2), props2)
+
+    # Splice both instances into a root tree at DIFFERENT positions -- the
+    # same shape a real page composes them in, and what makes their
+    # node_keys' positional paths differ.
+    mut root_kids: List[Pointer[UiNode]] = [card1, card2]
+    mut root = box_node(UiNode.Element("panel", "flex-col gap-2", "", "", root_kids))
+
+    mut it = Interpreter.init()
+    mut c = BufferCanvas.init(W, H, 0x1E293B)
+    render_to(it, root, c)
+
+    mut b1 = it.root.children[0]
+    mut b2 = it.root.children[1]
+
+    # b1 layout: [0]=header row (2 children: title text, header slot text), [1]=body slot text
+    check_int("card1 header row has 2 children (title + filled header slot)", len(b1.children[0].children), 2)
+    check_str("card1 title prop substituted into the text node", b1.children[0].children[0].text, "Settings")
+    check_str("card1 header slot content made it into the tree", b1.children[0].children[1].text, "beta")
+    check_str("card1 default-slot body content is in the right position", b1.children[1].text, "General options")
+
+    # b2 layout: header slot went UNFILLED -> header row has exactly 1 child (the title).
+    check_int("card2 header row has 1 child (unfilled named slot contributes nothing)", len(b2.children[0].children), 1)
+    check_str("card2 title prop substituted independently of card1's", b2.children[0].children[0].text, "About")
+    check_str("card2 default-slot body content is in the right position", b2.children[1].text, "Nebula v1")
+
+    # Identity: two instances of the SAME template at different structural
+    # positions get different positional node_keys, same mechanism as two
+    # hand-written <panel> blocks -- proposal v5 section 6's claim.
+    check_bool("two component instances get distinct node_keys", b1.node_key != b2.node_key, true)
+    check_bool("a component instance's title text gets its own node_key too", b1.children[0].children[0].node_key != b2.children[0].children[0].node_key, true)
+
+    # A template with no slots at all should round-trip unchanged (no crash
+    # on the "just an ordinary tree" path through instantiate_node).
+    mut plain_src = "<panel \"flex-row gap-1\">\n  <text \"text-white\">Plain</text>\n</panel>\n"
+    mut pp = UiParser.init()
+    mut plain_tpl = pp.parse(plain_src)
+    mut plain = instantiate(plain_tpl, one_slot([]), no_props())
+
+    mut it2 = Interpreter.init()
+    mut c2 = BufferCanvas.init(W, H, 0x1E293B)
+    render_to(it2, plain, c2)
+    check_int("slot-less template still has its one child", len(it2.root.children), 1)
+    check_str("slot-less template's text is untouched by substitution", it2.root.children[0].text, "Plain")
+
+    # A template whose ROOT is itself a bare <slot/> degenerates to an empty
+    # panel rather than crashing or returning a null pointer.
+    mut root_slot_src = "<slot/>\n"
+    mut rsp = UiParser.init()
+    mut root_slot_tpl = rsp.parse(root_slot_src)
+    mut degenerate = instantiate(root_slot_tpl, one_slot([]), no_props())
+    mut dn = read_node(degenerate)
+    match dn:
+        case UiNode.Element(tag, cls, evt, handler, kids):
+            check_str("a root-<slot/> template degenerates to an empty panel", tag, "panel")
+        case UiNode.Text(cls, value):
+            check_bool("a root-<slot/> template should not degenerate to a Text node", false, true)
+        case _:
+            check_bool("a root-<slot/> template should not degenerate to <unknown>", false, true)
+
+    print("")
+    print(_pass.to_str() + " passed, " + _fail.to_str() + " failed")
+    if _fail > 0:
+        print("FAIL")
+    else:
+        print("OK")

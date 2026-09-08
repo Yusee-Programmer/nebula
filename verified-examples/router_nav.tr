@@ -1,0 +1,168 @@
+# verified-examples/router_nav.tr — SPA navigation (proposal v5, section 9).
+#
+# Two routes ("home", "settings") on a Router, navigated forward and back,
+# with route params reaching each page's {title} the same way a component
+# prop would. Also proves section 9.3's caveat is real AND that its escape
+# hatch actually closes it: two pages that put a stateful widget at the
+# same tree position share a node_key (and so leak state across a
+# navigation) UNLESS both give that widget an explicit key-<routename>-...
+# token, in which case they don't.
+#
+#   tauraroc --run verified-examples/router_nav.tr
+
+from toolkit.ui.parser import UiParser
+from toolkit.ui.ast import UiNode
+from toolkit.ui.component import instantiate, one_slot, no_props
+from toolkit.ui.router import Router
+from toolkit.ui.interp import Interpreter, render_to
+from toolkit.render.hosted.buffer import BufferCanvas
+
+mut _pass: int = 0
+mut _fail: int = 0
+
+def check_str(label: str, got: str, want: str) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got \"" + got + "\" want \"" + want + "\"")
+
+def check_bool(label: str, got: bool, want: bool) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+def check_int(label: str, got: int, want: int) -> void:
+    if got == want:
+        _pass = _pass + 1
+    else:
+        _fail = _fail + 1
+        print("  FAIL " + label + ": got " + got.to_str() + " want " + want.to_str())
+
+# A shell with a persistent nav row and a <slot/> where the current page
+# lands -- the same template every frame, only the SPLICED page changes.
+mut shell_src = "<panel \"flex-col bg-slate-800\">\n  <panel \"flex-row gap-2 p-1\">\n    <text \"text-white\">NAV</text>\n  </panel>\n  <slot/>\n</panel>\n"
+
+def render_route(router: Router, shell_tpl: Pointer[UiNode], it: Interpreter, c: BufferCanvas) -> void:
+    mut page_tree = router.page(one_slot([]))
+    mut full = instantiate(shell_tpl, one_slot([page_tree]), no_props())
+    render_to(it, full, c)
+
+def main():
+    mut W = 200
+    mut H = 200
+
+    mut sp = UiParser.init()
+    mut shell_tpl = sp.parse(shell_src)
+
+    # ---- 9.5: basic navigate() / back() / params bookkeeping ----
+    mut home_src = "<panel \"flex-col p-2\">\n  <text \"text-lg\">{title}</text>\n</panel>\n"
+    mut settings_src = "<panel \"flex-col p-2\">\n  <text \"text-lg\">{title}</text>\n</panel>\n"
+    mut hp = UiParser.init()
+    mut home_tpl = hp.parse(home_src)
+    mut stp = UiParser.init()
+    mut settings_tpl = stp.parse(settings_src)
+
+    mut r = Router.init()
+    r.register("home", home_tpl)
+    r.register("settings", settings_tpl)
+    check_bool("no history right after init", r.can_back(), false)
+
+    mut home_props: Dict[str, str] = {}
+    home_props["title"] = "Home"
+    r.navigate("home", home_props)
+    check_str("current route after first navigate()", r.current, "home")
+    check_bool("first navigate() pushes nothing (nowhere to come back to)", r.can_back(), false)
+
+    mut settings_props: Dict[str, str] = {}
+    settings_props["title"] = "Settings"
+    r.navigate("settings", settings_props)
+    check_str("current route after second navigate()", r.current, "settings")
+    check_bool("second navigate() makes back() available", r.can_back(), true)
+
+    mut went_back = r.back()
+    check_bool("back() reports success when history is non-empty", went_back, true)
+    check_str("back() restores the previous route", r.current, "home")
+    check_str("back() restores the previous route's params", r.params["title"], "Home")
+    check_bool("history is empty again after the one back()", r.can_back(), false)
+
+    mut went_back_again = r.back()
+    check_bool("back() with empty history is a reported no-op", went_back_again, false)
+    check_str("back() no-op leaves current route unchanged", r.current, "home")
+
+    # ---- page() renders the CURRENT route with its params as props ----
+    mut it_a = Interpreter.init()
+    mut c_a = BufferCanvas.init(W, H, 0x1E293B)
+    render_route(r, shell_tpl, it_a, c_a)
+    check_str("shell nav row is present alongside the page", it_a.root.children[0].children[0].text, "NAV")
+    check_str("route param reached the page's {title} like a component prop", it_a.root.children[1].children[0].text, "Home")
+
+    r.navigate("settings", settings_props)
+    render_route(r, shell_tpl, it_a, c_a)
+    check_str("page() swaps to the new current route next render", it_a.root.children[1].children[0].text, "Settings")
+
+    # ---- 9.3: the collision, demonstrated ----
+    # Both pages put an UNKEYED stateful widget as their second child --
+    # same shell slot position every time, so it gets the same node_key.
+    mut home_coll_src = "<panel \"flex-col p-2\">\n  <text \"text-lg\">{title}</text>\n  <panel \"w-6 h-6 bg-blue-500\" />\n</panel>\n"
+    mut settings_coll_src = "<panel \"flex-col p-2\">\n  <text \"text-lg\">{title}</text>\n  <panel \"w-6 h-6 bg-red-500\" />\n</panel>\n"
+    mut hcp = UiParser.init()
+    mut home_coll_tpl = hcp.parse(home_coll_src)
+    mut scp = UiParser.init()
+    mut settings_coll_tpl = scp.parse(settings_coll_src)
+
+    mut rc = Router.init()
+    rc.register("home", home_coll_tpl)
+    rc.register("settings", settings_coll_tpl)
+    rc.navigate("home", home_props)
+
+    mut it_c = Interpreter.init()
+    mut c_c = BufferCanvas.init(W, H, 0x1E293B)
+    render_route(rc, shell_tpl, it_c, c_c)
+    mut home_widget_key = it_c.root.children[1].children[1].node_key
+    it_c.state_set(home_widget_key, 99)
+    check_int("state written on home's widget reads back before navigating away", it_c.state_get(home_widget_key, 0-1), 99)
+
+    rc.navigate("settings", settings_props)
+    render_route(rc, shell_tpl, it_c, c_c)
+    mut settings_widget_key = it_c.root.children[1].children[1].node_key
+    check_str("unkeyed widgets at the same slot position share a node_key across routes", settings_widget_key, home_widget_key)
+    check_int("...and so settings' widget inherits home's leftover state (the caveat, reproduced)", it_c.state_get(settings_widget_key, 0-1), 99)
+
+    # ---- 9.3: the escape hatch, proven to close the gap ----
+    # Identical shape, but each page's widget carries an explicit
+    # key-<routename>-toggle token.
+    mut home_key_src = "<panel \"flex-col p-2\">\n  <text \"text-lg\">{title}</text>\n  <panel \"key-home-toggle w-6 h-6 bg-blue-500\" />\n</panel>\n"
+    mut settings_key_src = "<panel \"flex-col p-2\">\n  <text \"text-lg\">{title}</text>\n  <panel \"key-settings-toggle w-6 h-6 bg-red-500\" />\n</panel>\n"
+    mut hkp = UiParser.init()
+    mut home_key_tpl = hkp.parse(home_key_src)
+    mut skp = UiParser.init()
+    mut settings_key_tpl = skp.parse(settings_key_src)
+
+    mut rk = Router.init()
+    rk.register("home", home_key_tpl)
+    rk.register("settings", settings_key_tpl)
+    rk.navigate("home", home_props)
+
+    mut it_k = Interpreter.init()
+    mut c_k = BufferCanvas.init(W, H, 0x1E293B)
+    render_route(rk, shell_tpl, it_k, c_k)
+    mut home_keyed = it_k.root.children[1].children[1].node_key
+    check_str("explicit key- token produces the namespaced key", home_keyed, "K:home-toggle")
+    it_k.state_set(home_keyed, 99)
+
+    rk.navigate("settings", settings_props)
+    render_route(rk, shell_tpl, it_k, c_k)
+    mut settings_keyed = it_k.root.children[1].children[1].node_key
+    check_str("settings' own explicit key is namespaced differently from home's", settings_keyed, "K:settings-toggle")
+    check_bool("the two routes' keyed widgets are genuinely distinct keys", settings_keyed != home_keyed, true)
+    check_int("settings' widget does NOT inherit home's state once both are keyed (the escape hatch works)", it_k.state_get(settings_keyed, 0-1), 0-1)
+
+    print("")
+    print(_pass.to_str() + " passed, " + _fail.to_str() + " failed")
+    if _fail > 0:
+        print("FAIL")
+    else:
+        print("OK")

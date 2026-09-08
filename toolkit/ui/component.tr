@@ -1,0 +1,86 @@
+# toolkit.ui.component — reusable, authored UI components (proposal v5).
+#
+# A component is a plain `.ui` template (parsed once, like any other markup)
+# containing `<slot/>` / `<slot "name"/>` placeholders for caller-supplied
+# children and `{prop}` placeholders in class strings / text bodies.
+# `instantiate()` walks a parsed template and produces a FRESH tree with
+# slots spliced in and props substituted -- ordinary `UiNode`s by the time
+# it returns, indistinguishable from hand-built markup at that position.
+#
+# This runs BEFORE layout_tree()/build() ever sees the tree, which is why
+# nothing in toolkit.layout.flex, toolkit.ui.interp or toolkit.render.scene
+# had to change: node_key's positional-path identity (proposal v4 step F)
+# falls out for free, because two instantiate() calls spliced at two
+# different structural positions get two different `path` strings for the
+# same reason two copy-pasted <panel> blocks would.
+#
+# See docs/proposal/proposal-v5-components.md for the full design and what
+# this deliberately does not attempt (no markup-level invocation syntax, no
+# fallback slot content, no conditional/looping structure in a template).
+
+from toolkit.ui.ast import UiNode, box_node, read_node, max_depth
+from string.str import Str
+
+# A slot's name lives in the class-string field of its `<slot .../>` tag --
+# the same trick `key-<name>` already uses to carry data through the one
+# bare-string-per-tag grammar without a parser change. `<slot/>` (no class
+# string) is the default slot, name "".
+def is_slot_tag(tag: str) -> bool:
+    return tag == "slot"
+
+def substitute(s: str, props: Dict[str, str]) -> str:
+    mut result = s
+    for key, value in props.items():
+        result = Str.replace(result, "{" + key + "}", value)
+    return result
+
+# Returns the list of nodes a single template node expands to: exactly one
+# for an ordinary Element/Text, zero-or-more for a <slot> (whatever the
+# caller supplied under that name, or nothing if the slot went unfilled).
+def instantiate_node(node: Pointer[UiNode], slots: Dict[str, List[Pointer[UiNode]]], props: Dict[str, str], depth: int) -> List[Pointer[UiNode]]:
+    mut n = read_node(node)
+    mut out: List[Pointer[UiNode]] = []
+
+    match n:
+        case UiNode.Element(tag, cls, evt, handler, kids):
+            if is_slot_tag(tag):
+                if cls in slots:
+                    for filled in slots[cls]:
+                        out.append(filled)
+                return out
+
+            mut new_kids: List[Pointer[UiNode]] = []
+            if depth < max_depth():
+                for k in kids:
+                    for spliced in instantiate_node(k, slots, props, depth + 1):
+                        new_kids.append(spliced)
+            out.append(box_node(UiNode.Element(tag, substitute(cls, props), evt, handler, new_kids)))
+            return out
+        case UiNode.Text(cls, value):
+            out.append(box_node(UiNode.Text(substitute(cls, props), substitute(value, props))))
+            return out
+        case _:
+            return out
+
+pub def instantiate(template: Pointer[UiNode], slots: Dict[str, List[Pointer[UiNode]]], props: Dict[str, str]) -> Pointer[UiNode]:
+    mut result = instantiate_node(template, slots, props, 0)
+    if len(result) > 0:
+        return result[0]
+    # A template whose ROOT is itself a <slot/> is degenerate -- there is no
+    # element left to return once the slot is spliced away. An empty panel
+    # keeps every caller's "always get back a Pointer[UiNode]" contract true
+    # rather than forcing a null check onto every call site for a case no
+    # real template hits.
+    mut empty: List[Pointer[UiNode]] = []
+    return box_node(UiNode.Element("panel", "", "", "", empty))
+
+# Shorthand for the common case: one default slot, no named slots.
+pub def one_slot(children: List[Pointer[UiNode]]) -> Dict[str, List[Pointer[UiNode]]]:
+    mut m: Dict[str, List[Pointer[UiNode]]] = {}
+    m[""] = children
+    return m
+
+# Shorthand for a component instantiated with no prop substitution.
+pub def no_props() -> Dict[str, str]:
+    mut m: Dict[str, str] = {}
+    return m

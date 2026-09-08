@@ -10,6 +10,7 @@
   <panel "flex-row gap-4 grow">
     <panel "w-1/2 bg-indigo-500 rounded-xl" />
     <panel "grow bg-emerald-500 rounded-xl" />
+    <panel "grow bg-emerald-500 rounded-xl" />
   </panel>
 
   <panel "flex-row gap-4 h-14">

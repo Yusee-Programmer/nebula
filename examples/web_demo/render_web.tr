@@ -98,6 +98,16 @@ mut _cb_on:    bool = false
 mut _sw_on:    bool = false
 mut _sw_knob:  int = 0
 mut _sl_val:   int = 55   # NOT the real default -- see reset_defaults()
+# Whether a slider drag is currently in progress -- has to be its OWN
+# persistent scalar (see this file's header on why: only scalars survive
+# across frames here). `Slider.press_inside`/`drag_to` were designed for a
+# host that keeps ONE long-lived Slider object across frames (see
+# toolkit.ui.slider's own header) -- this file instead reconstructs a fresh
+# `Slider` every frame (same "persistent state: scalars only" constraint),
+# so `sl.dragging` can never carry forward past the frame it was set on.
+# Read this scalar back into the fresh Slider's own `dragging`/`origin_*`
+# fields every frame a drag is active (see nebula_frame below) instead.
+mut _sl_dragging: bool = false
 
 def panel_bg() -> int:
     return 0x1E293B
@@ -126,6 +136,7 @@ def reset_defaults() -> void:
     _cb_on = false
     _sw_on = false
     _sw_knob = 0
+    _sl_dragging = false
 
 pub export def nebula_init(width: int, height: int) -> usize:
     unsafe:
@@ -210,10 +221,26 @@ pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int,
         cb.click_inside(mouse_x, mouse_y, cbx, cby, 20, 20)
         sw.click_inside(mouse_x, mouse_y, swx, swy, 48, 26)
         it.dispatch(Event.click(mouse_x, mouse_y))
+        if sl.press_inside(mouse_x, mouse_y, slx, sly, slw, 24):
+            _sl_dragging = true
+    if not pressed:
+        _sl_dragging = false
 
-    sl.paint(canvas, slx, sly, slw, 24)
-    if pressed:
+    # `sl` is a fresh object THIS frame -- press_inside's hit-test (rejecting
+    # a click far from the thumb) is only meaningful on the frame a drag
+    # STARTS. Once `_sl_dragging` is latched, prime this frame's Slider
+    # directly from that persistent flag and drag unconditionally: a real
+    # drag moves the mouse away from the thumb's last position by design,
+    # so re-running the hit-test every frame would cancel the drag as soon
+    # as the mouse moved (see this file's header on why persistence has to
+    # go through scalars, not the Slider object itself).
+    if _sl_dragging:
+        sl.dragging = true
+        sl.origin_x = slx
+        sl.origin_w = slw
+        sl.origin_h = 24
         sl.drag_to(mouse_x)
+    sl.paint(canvas, slx, sly, slw, 24)
     sw.tick()
 
     _cb_on = cb.checked

@@ -1,11 +1,13 @@
 # Proposal v6 — a `Renderer` layer, then GPU desktop + native web backends
 
-**Status:** Phases 1 and 2 implemented and verified 2026-09-09, including a
-second full app (`desktop_shell_gl` + a new `Scrollbar` widget). Phase 3's
-core mechanism (calling a JS-provided function from wasm) is now verified
-end-to-end (two real Tauraro compiler bugs found+fixed along the way, plus
-a one-flag `scripts/build-web.ps1` change) — `Canvas2DRenderer` itself is
-not yet built (see its own status section below).
+**Status:** All three phases implemented and verified 2026-09-09. Phase 1:
+the `Renderer` seam. Phase 2: `GlCanvas` (desktop OpenGL), two full apps
+(`widgets_demo_gl`, `desktop_shell_gl` + a new `Scrollbar` widget). Phase 3:
+`Canvas2DCanvas` (browser Canvas2D via WASM host imports), one comprehensive
+app (`web_shell`) — screenshot-verified live in Edge with genuinely native
+antialiasing/text. Two real Tauraro compiler bugs and two real nebula bugs
+(a dead slider drag, a freestanding-boot crash) found and fixed along the
+way; see each phase's own status section for the full story.
 In response to a direct request to (1) gamma-correct blend (done, see
 RASTERIZER.md's own status note) (2) GPU-accelerate every UI tier except
 UEFI/bare-metal (3) give the browser tier native Canvas2D quality. This
@@ -285,7 +287,82 @@ This phase should be scoped as its own session, not squeezed in after phase 1.
 
 ## 5. Phase 3 — Canvas2D web backend, opt-in, browser-native quality
 
-### Phase 3 status — the core mechanism is UNBLOCKED, verified end-to-end
+### Phase 3 status — SHIPPED: Canvas2DRenderer, verified in a real browser
+
+`toolkit/render/web/canvas2d_renderer.tr`'s `Canvas2DCanvas` — same
+one-class-implements-both-Canvas-and-Renderer shape as `GlCanvas`, since
+every shape reduces to a `js_rounded_rect`/`js_circle`/`js_fill_text` call
+either way. `rounded_box`/`circle_ring` are the same two-pass border trick
+`GlCanvas` uses (outer shape in the border colour, inset shape in the fill
+colour on top) — real Canvas2D alpha compositing does the rest, no 3-way CPU
+blend math needed here either. Every extern uses `c_int` (not Tauraro's own
+64-bit `int`), so every value crosses into JS as a plain Number, never a
+BigInt — much lighter host-page glue than `int`/`usize` would need.
+
+New comprehensive example, `examples/web_shell/main.tr` +
+`examples/web_shell/index.html`: Checkbox, a 3-way Radio group, Switch,
+Slider + ProgressBar, and ScrollList (wheel-scrollable) — **every one of
+these widgets needed ZERO changes** to run through `Canvas2DCanvas`; they
+already routed through `Renderer` from phase 1, so setting `.renderer =
+canvas2d_renderer_of(canvas)` each frame was the entire integration cost.
+Screenshot-verified running in real Edge: genuinely crisp native rounded
+corners/circles/text, visibly sharper than the baked-bitmap-font look on
+every other tier — exactly the quality gap this phase set out to close.
+Real click + slider-drag interaction confirmed live (the in-page "Recent
+items" log and changing slider value moved in response to real OS-level
+mouse input, not just a static render).
+
+TextInput is NOT included — its persistent state is a live text buffer +
+cursor position, and this file's "freestanding target: no module
+initializers, persistent state is scalars only" constraint (same one
+`render_web.tr` already documents) doesn't have a clean answer for that yet.
+A real gap, left for a future pass, not attempted here.
+
+**A second real bug found and fixed in `examples/web_demo` while getting
+here** (unrelated to Canvas2D, but found staring at this same freestanding
+pipeline): `render_web.tr`'s slider never actually dragged.
+`Slider.drag_to()` only acts while `.dragging` is true, but `.dragging` is
+only ever set by `.press_inside()` — which was never called anywhere in the
+frame loop, so a freshly-constructed `Slider` (one is built every frame,
+same "scalars only" constraint) always had `dragging = false` and
+`drag_to()` was silently a no-op every frame. Fixed with a persistent
+`_sl_dragging` scalar: `press_inside()` on the click that starts a drag,
+then every following frame while the button stays down, manually prime the
+fresh `Slider`'s own `dragging`/`origin_x`/`origin_w`/`origin_h` fields
+(all `pub`) from that scalar and call `drag_to()` directly — calling
+`press_inside()` again on those later frames would fail its own hit-test
+as soon as the mouse moves away from the thumb's last position, which is
+what a drag necessarily does.
+
+**A third real, deeper bug found and fixed getting `examples/web_demo` to
+even RUN at all under `--import-symbols`** (also unrelated to Canvas2D,
+also found in this same investigation): the browser build crashed
+immediately inside `nebula_heap_init` with a WASM "memory access out of
+bounds". Root cause, confirmed by tracing the generated C: EVERY `pub
+export def` on a freestanding target gets a compiler-injected "run once"
+guard that initializes ALL reachable module-level globals the first time
+ANY exported function is called (freestanding has no libc/_start to run
+them the normal way) — correct in general, since the compiler can't know
+which exported function a host calls first. But `toolkit/render/gamma.tr`'s
+two 256-entry `List[int]` globals (`SRGB_TO_LINEAR`/`LINEAR_TO_SRGB`) need
+heap allocation to build, and the very call that sets up the allocator
+(`arena_init`, inside `nebula_heap_init` itself) runs AFTER that guard in
+the SAME function — so the first allocation these tables need happens
+before the arena knows its own base/size. A general compiler fix would need
+either a new "static-backed, never-reallocated" `List` representation (real
+scope: `List_i64`'s struct is one of the most fundamental, pervasively-used
+types in the whole runtime — changing its layout is high-blast-radius, not
+contained) or a separate compiler-internal bootstrap allocator independent
+of the user's own arena (a new runtime concept). Neither attempted — instead
+converted both tables from `List[int]` literals to `[int; 256]` fixed-size
+arrays (an inline VALUE type, no heap pointer at all) with an explicit
+lazy-init-on-first-use guard of their own (`_gamma_tables_ready`), so they
+need no allocator, no arena, and no ordering relative to anything else —
+correct on every target uniformly, not just freestanding. See
+`toolkit/render/gamma.tr`'s own updated header for the full trace.
+
+Old (pre-fix) content below, kept for the record of how this was
+investigated:
 
 Investigated 2026-09-09. Canvas2D needs Tauraro code to CALL a JS-provided
 function (`js_rounded_rect` etc.) — the OPPOSITE direction from

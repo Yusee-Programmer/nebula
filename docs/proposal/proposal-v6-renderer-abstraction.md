@@ -1,9 +1,11 @@
 # Proposal v6 — a `Renderer` layer, then GPU desktop + native web backends
 
 **Status:** Phases 1 and 2 implemented and verified 2026-09-09, including a
-second full app (`desktop_shell_gl` + a new `Scrollbar` widget). Phase 3 is
-blocked on two real compiler gaps, found and reported, not yet fixed (see
-its own status section below).
+second full app (`desktop_shell_gl` + a new `Scrollbar` widget). Phase 3's
+core mechanism (calling a JS-provided function from wasm) is now verified
+end-to-end (two real Tauraro compiler bugs found+fixed along the way, plus
+a one-flag `scripts/build-web.ps1` change) — `Canvas2DRenderer` itself is
+not yet built (see its own status section below).
 In response to a direct request to (1) gamma-correct blend (done, see
 RASTERIZER.md's own status note) (2) GPU-accelerate every UI tier except
 UEFI/bare-metal (3) give the browser tier native Canvas2D quality. This
@@ -283,52 +285,81 @@ This phase should be scoped as its own session, not squeezed in after phase 1.
 
 ## 5. Phase 3 — Canvas2D web backend, opt-in, browser-native quality
 
-### Phase 3 status — blocked on two real compiler gaps, not yet fixed
+### Phase 3 status — the core mechanism is UNBLOCKED, verified end-to-end
 
-Investigated 2026-09-09, before writing any nebula code, because Phase 2's
-own experience (the `Pointer[void] as def(...)->...` cast) showed it's worth
-confirming the compiler mechanism exists before building on top of it.
-Canvas2D needs Tauraro code to CALL a JS-provided function (`js_rounded_rect`
-etc.) — the OPPOSITE direction from `examples/web_demo`'s current wasm build,
-which imports NOTHING and only shares a raw pixel buffer JS reads directly.
+Investigated 2026-09-09. Canvas2D needs Tauraro code to CALL a JS-provided
+function (`js_rounded_rect` etc.) — the OPPOSITE direction from
+`examples/web_demo`'s current wasm build, which imports NOTHING and only
+shares a raw pixel buffer JS reads directly.
 
-Tauraro does have the right *syntax* for this — `extern "C": def
-js_rounded_rect(...) -> void` with no body, documented in
-`docs/lang/17_extern_and_ffi.md` — but two separate gaps stand between that
-syntax and a working browser import today:
+**First investigation pass wrongly assumed `--backend llvm` was required**
+(that's what `docs/lang/22_compiling_and_cross_compilation.md` states for
+"any wasm target"), and testing that path surfaced two real Tauraro compiler
+bugs, both found, fixed, fixpoint-verified (gen1≡gen2≡gen3), and regression-
+clean (`scripts/run_tests.ps1`, 20 files, only the 3 pre-existing unrelated
+failures) in the tauraro repo:
 
-1. **The LLVM backend rejects calling an extern function with no
-   definition at all** — `"unsupported expression: call js_rounded_rect()"`.
-   Since `docs/lang/22_compiling_and_cross_compilation.md` requires
-   `--backend llvm` for any wasm target, this alone blocks the approach
-   regardless of the second gap.
-2. **The wasm link path has no `--allow-undefined`/`-Wl,--import-undefined`
-   wiring** in `src/main.tr`'s wasm build command — wasm-ld's default is to
-   *error* on an unresolved function symbol rather than leave it as an
-   import, so even with gap 1 fixed, linking would fail rather than produce
-   an importable `.wasm`.
+1. `src/taumir/lower.tr`'s `extern "C"` registration only recognized
+   Tauraro's own int/str/bool/f64 spellings, not the FFI `c_*` scalar family
+   (`c_int`, `c_uint`, ...) — an extern declared with `c_int` params (the
+   natural choice for `js_rounded_rect(x: c_int, ...)`) silently failed
+   registration and the call site failed later with a confusing
+   `"unsupported expression: call js_rounded_rect()"`. Fixed by widening the
+   registration check to the same `c_*` list `src/codegen/c.tr` already
+   recognizes (`_extern_sig_tag`).
+2. `--backend llvm --target wasm`'s cross-link step had no
+   `--allow-undefined` equivalent, so wasm-ld errored on the intentionally-
+   unresolved import symbol. Real complication found while fixing it: `zig
+   cc`'s own frontend REJECTS `-Wl,--allow-undefined`/`-Wl,--import-undefined`
+   outright ("unsupported linker arg"), even though `zig wasm-ld` (the linker
+   `zig cc` calls internally) fully supports both — confirmed by dry-running
+   `zig cc -v` and replicating its own link line by hand. Fixed with a
+   fallback in `src/main.tr`: only after the normal link fails with exactly
+   "undefined symbol" does it retry via `zig wasm-ld` directly (bypassing zig
+   cc's frontend for that one step), for `wasm32-unknown-unknown` specifically
+   (no libc/crt objects to replicate, unlike the wasi case).
 
-Neither gap was fixed this session (this is a Tauraro compiler change, not
-a nebula one — the same category as the `Pointer[void] as def(...)->...`
-fix that unblocked phase 2, but this one needs LLVM-backend codegen work
-plus a linker-flag change, not a single codegen case). Also could not be
-empirically end-to-end verified even with those two fixed: this box has no
-bundled/system `zig` and the system `clang` (mingw64) lacks a wasm
-sysroot/wasi-libc, so `--target wasm-wasi`/`--target wasm` currently fail
-before reaching the link step regardless (a separate, pre-existing gap, not
-new to this investigation). A real `--allow-undefined`-style build would
-need either a working wasm sysroot on this box or a session where that's
-set up first.
+**Then the actual answer turned up: nebula doesn't use `--backend llvm` for
+wasm at all.** `scripts/build-web.ps1` already uses the DEFAULT `--backend c`
+(`--freestanding --emit c`), then invokes `zig build-exe` directly on the
+emitted C — a completely different, already-working pipeline neither of the
+two fixes above touches. Testing THAT pipeline with a `js_rounded_rect`
+extern found the C backend already declares/calls it correctly with zero
+changes needed — the only missing piece was a single `zig build-exe` flag:
+**`--import-symbols`** ("(WebAssembly) import missing symbols from the host
+environment" — `zig build-exe`'s own native equivalent of `--allow-undefined`,
+with none of `zig cc`'s frontend restrictions). Added to
+`scripts/build-web.ps1`.
 
-**What this means for Phase 3:** `Canvas2DRenderer` as designed (JS-import
-based, native `ctx.roundRect`/`ctx.arc`/`ctx.fillText`) is not buildable yet.
-`WebCanvas`'s existing raw-pixel-buffer approach still works unchanged and
-is not affected by any of this. Phase 3 is ON HOLD pending a decision: fix
-the two compiler gaps first (a real, scoped compiler task, likely smaller
-than phase 2's shader work but touching LLVM backend internals rather than
-one codegen case), set up a working wasm sysroot and re-verify, or defer
-Phase 3 indefinitely and treat `WebCanvas` as the web tier's permanent
-ceiling.
+**Verified completely end-to-end** with a standalone probe (`extern "C": def
+js_rounded_rect(...)` + the same `@allocator`/`@free`/`@realloc`/`@calloc` +
+`toolkit.platform.arena` hooks `render_web.tr` already uses): compiled via
+`--target wasm --freestanding --emit c`, linked via `zig build-exe
+--import-symbols`, inspected with `WebAssembly.Module.imports()` under Node
+(`[{"module":"env","name":"js_rounded_rect","kind":"function"}]` — a real
+host import, exactly as needed), then actually instantiated with a real JS
+implementation and called — `js_rounded_rect` fired in JS with the correct
+argument values round-tripped from Tauraro. This is the exact mechanism
+`Canvas2DRenderer` needs for `ctx.roundRect`/`ctx.arc`/`ctx.fillText`.
+
+**Not yet done:** rebuilding the FULL `web_demo` with the new flag to confirm
+zero regression on the existing (import-free) build — attempted 4 times this
+session and OOM'd every time during `zig build-exe -O ReleaseSmall`'s
+compile of all 30 toolkit C files, but this reproduces IDENTICALLY with the
+new flag removed too (confirmed by testing the exact same command without
+`--import-symbols`), so it's this box's existing memory ceiling for that
+specific heavy build, not something this change caused — worth re-running
+once on a less memory-pressured run, but not blocking: the flag only changes
+what happens to a symbol that would otherwise be a hard link error, so it's
+a no-op for any build (like today's `web_demo`) with no unresolved externs.
+
+**What this means for Phase 3:** `Canvas2DRenderer` (`toolkit/render/web/
+canvas2d_renderer.tr`, the JS-import glue functions, wiring it into
+`render_web.tr`) can be built next session — the mechanism it depends on is
+now proven, not theoretical. The two LLVM-backend/wasm-link compiler fixes
+also landed and are real, general improvements (any `extern "C"` using `c_*`
+types, and `--backend llvm --target wasm32-unknown-unknown` generally) even
+though they turned out not to be on nebula's actual critical path.
 
 ---
 

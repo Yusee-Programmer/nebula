@@ -12,7 +12,8 @@
 #   agree.paint(canvas, fx, fy, 18, 18)
 
 from toolkit.render.canvas import Canvas
-from toolkit.ui.interp import paint_rounded_rect_aa, paint_rounded_box_aa
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 
 pub class Checkbox:
     pub checked: bool
@@ -27,6 +28,12 @@ pub class Checkbox:
     # known backdrop instead). Defaults to this session's demo background;
     # set it directly if you place a Checkbox somewhere else.
     pub page_bg: int
+    # proposal v6 phase 1: how this widget actually draws its rounded box --
+    # defaults to the same software rasterizer paint() always called
+    # directly, so nothing about existing callers changes. Swap it for a
+    # GPU/Canvas2D Renderer (phase 2/3) to accelerate just this widget, or
+    # every widget sharing one Renderer instance.
+    pub renderer: Renderer
 
 extend Checkbox:
     pub def init(checked: bool) -> Checkbox:
@@ -37,6 +44,7 @@ extend Checkbox:
         b.border = 0x64748B
         b.mark = 0xFFFFFF
         b.page_bg = 0x0B1120
+        b.renderer = default_renderer()
         return b
 
     pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
@@ -50,9 +58,9 @@ extend Checkbox:
     # size it to match surrounding text.
     pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
         if self.checked:
-            paint_rounded_rect_aa(c, x, y, w, h, 4, self.bg_on, self.page_bg)
+            self.renderer.rounded_rect(c, x, y, w, h, 4, self.bg_on, self.page_bg)
         else:
-            paint_rounded_box_aa(c, x, y, w, h, 4, 2, self.bg_off, self.border, self.page_bg)
+            self.renderer.rounded_box(c, x, y, w, h, 4, 2, self.bg_off, self.border, self.page_bg)
 
         if not self.checked:
             return

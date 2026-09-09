@@ -198,6 +198,30 @@ invisible. Do not implement the exact form.
 pixel. For corner radii below ~2 px it visibly rounds off. Below that, fall back to
 supersampling the corner region.
 
+**Status: implemented 2026-09-09**, for circles and rounded-rect/box corners
+specifically (not the general `rounded_rect`/`segment` SDFs above — every corner in
+this toolkit is drawn as a quarter-circle around a locally-shifted center, per
+`paint_corner`'s own convention, so the plain `circle()` distance function already
+covers it). `toolkit/ui/interp.tr`'s `analytic_coverage(dx, dy, r)` replaces the
+original 4x4=16-subsample `pixel_coverage` for every shape rasterizer
+(`fill_circle_aa`, `fill_circle_ring_aa`, `paint_corner_aa`, `paint_border_corner_aa`)
+with exactly this ramp, returning 0..255 rather than 0..16 (see `mix_color_hq`/
+`mix3_color_hq`) since a continuous distance measurement resolves far more than 17
+shades — that, not a better guess at the same 17 buckets, is what removes the visible
+banding a discrete grid leaves around a circle at typical widget sizes (verified: a
+radio button's ring at 12x zoom shows a continuous gradient on both edges with no
+visible steps). Uses `Math.isqrt` (`std/math/int.tr`, pure integer Newton's method,
+already shipped and unrelated to this toolkit) instead of writing a dedicated
+fixed-point sqrt — `dist16 = Math.isqrt(dist_sq * 256)` gives distance scaled by 16
+(1/16-pixel precision) without introducing floats. `draw_text`'s glyph blending is
+UNCHANGED (still `pixel_coverage`/`mix_color`, 0..16): the baked font atlases
+(`toolkit/text/font_data*.tr`) store real 0..16 coverage as data, and re-baking three
+atlases for glyphs small enough that 17 levels was never the visible limit wasn't
+worth the risk. No caller-facing signatures changed; all existing
+`verified-examples/*.tr` (`opacity`, `clipping`, `animation`, `multi_size_font`,
+`tailwind_tokens`, `diff_render`, `grid_layout`, `node_identity`, `subrect_render`)
+re-ran clean with zero regressions.
+
 ### 4c. Polygons and glyph outlines — sub-scanline coverage
 
 This is the general case and the one text depends on. Use **N sub-scanlines per pixel

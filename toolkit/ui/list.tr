@@ -17,8 +17,9 @@
 #   recents.paint(canvas, fx, fy, fw, fh)
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 from toolkit.text.font import Font
-from toolkit.ui.interp import draw_text
 
 pub class ScrollList:
     pub items:         List[str]
@@ -30,6 +31,9 @@ pub class ScrollList:
     pub fg:             int
     pub selected_bg:    int
     pub font:           Font
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:       Renderer
 
 extend ScrollList:
     pub def init(items: List[str]) -> ScrollList:
@@ -43,6 +47,7 @@ extend ScrollList:
         l.fg = 0x0F172A
         l.selected_bg = 0xDBEAFE
         l.font = Font.load()
+        l.renderer = default_renderer()
         return l
 
     def visible_rows(self, h: int) -> int:
@@ -96,5 +101,5 @@ extend ScrollList:
                 elif idx % 2 == 1:
                     c.fill_rect(x, ry, w, self.row_h, self.row_bg_alt)
                     row_bg = self.row_bg_alt
-                draw_text(c, self.font, self.items[idx], x + 10, ry + (self.row_h - ch) / 2, self.fg, row_bg)
+                self.renderer.text(c, self.font, self.items[idx], x + 10, ry + (self.row_h - ch) / 2, self.fg, row_bg)
                 i = i + 1

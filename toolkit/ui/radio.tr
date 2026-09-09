@@ -21,7 +21,8 @@
 #       i = i + 1
 
 from toolkit.render.canvas import Canvas
-from toolkit.ui.interp import fill_circle_aa, fill_circle_ring_aa
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 
 pub class Radio:
     pub selected: bool
@@ -30,6 +31,8 @@ pub class Radio:
     pub bg:       int   # interior fill (both states)
     # See Checkbox.page_bg's comment -- same reason, same default.
     pub page_bg:  int
+    # See Checkbox.renderer's comment -- same reason, same default.
+    pub renderer: Renderer
 
 extend Radio:
     pub def init(selected: bool) -> Radio:
@@ -39,6 +42,7 @@ extend Radio:
         r.accent = 0x3B82F6
         r.bg = 0xFFFFFF
         r.page_bg = 0x0B1120
+        r.renderer = default_renderer()
         return r
 
     # Unlike Checkbox.click_inside, does NOT flip .selected itself -- a radio
@@ -59,10 +63,10 @@ extend Radio:
         mut ring_color = self.ring
         if self.selected:
             ring_color = self.accent
-        fill_circle_ring_aa(c, cx, cy, r, 2, self.bg, ring_color, self.page_bg)
+        self.renderer.circle_ring(c, cx, cy, r, 2, self.bg, ring_color, self.page_bg)
 
         if self.selected:
-            fill_circle_aa(c, cx, cy, r - 5, self.accent, self.bg)
+            self.renderer.circle(c, cx, cy, r - 5, self.accent, self.bg)
 
 # Selects group[chosen] and clears every other Radio in the same List --
 # a free function, not a method on Radio itself, since it operates on a

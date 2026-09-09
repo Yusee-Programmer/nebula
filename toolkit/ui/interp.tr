@@ -19,6 +19,8 @@ from toolkit.render.canvas import Canvas
 from toolkit.render.clipped_canvas import clip_canvas
 from toolkit.text.font import Font, Fonts
 from string.str import Str
+from math.int import Math
+from toolkit.render.gamma import srgb_to_linear, linear_to_srgb
 
 # One entry in the handler allowlist: a name UI content may reference, and the
 # host object it resolves to.
@@ -511,9 +513,9 @@ pub def paint_rounded_rect_aa(c: Canvas, x: int, y: int, w: int, h: int, radius:
     paint_corner_aa(c, x, y + h - r, r, fg, bg, true, false)
     paint_corner_aa(c, x + w - r, y + h - r, r, fg, bg, false, false)
 
-# Anti-aliased counterpart to paint_corner -- same r*4 quarter-pixel
-# supersampling as fill_circle_aa's pixel_coverage/mix_color, applied to a
-# quarter-circle instead of a full one.
+# Anti-aliased counterpart to paint_corner -- analytic distance-field
+# coverage (see analytic_coverage's own comment) applied to a quarter-circle
+# instead of a full one.
 def paint_corner_aa(c: Canvas, ax: int, ay: int, r: int, fg: int, bg: int, inner_right: bool, inner_bottom: bool) -> void:
     mut center_x = 0
     if inner_right:
@@ -521,17 +523,16 @@ def paint_corner_aa(c: Canvas, ax: int, ay: int, r: int, fg: int, bg: int, inner
     mut center_y = 0
     if inner_bottom:
         center_y = r
-    mut r4sq = (r * 4) * (r * 4)
 
     mut yy = 0 - 1
     while yy <= r:
         mut xx = 0 - 1
         while xx <= r:
-            mut coverage = pixel_coverage(xx - center_x, yy - center_y, r4sq)
-            if coverage == 16:
+            mut coverage = analytic_coverage(xx - center_x, yy - center_y, r)
+            if coverage == 255:
                 c.set_pixel(ax + xx, ay + yy, fg)
             elif coverage > 0:
-                c.set_pixel(ax + xx, ay + yy, mix_color(fg, bg, coverage))
+                c.set_pixel(ax + xx, ay + yy, mix_color_hq(fg, bg, coverage))
             xx = xx + 1
         yy = yy + 1
 
@@ -631,8 +632,6 @@ def paint_border_corner_aa(c: Canvas, ax: int, ay: int, r: int, b: int, fill: in
     mut ir = r - b
     if ir < 0:
         ir = 0
-    mut r4sq = (r * 4) * (r * 4)
-    mut ir4sq = (ir * 4) * (ir * 4)
 
     mut yy = 0 - 1
     while yy <= r:
@@ -640,31 +639,64 @@ def paint_border_corner_aa(c: Canvas, ax: int, ay: int, r: int, b: int, fill: in
         while xx <= r:
             mut dx = xx - center_x
             mut dy = yy - center_y
-            mut co = pixel_coverage(dx, dy, r4sq)
+            mut co = analytic_coverage(dx, dy, r)
             if co > 0:
-                mut ci = pixel_coverage(dx, dy, ir4sq)
-                if ci == 16:
+                mut ci = analytic_coverage(dx, dy, ir)
+                if ci == 255:
                     c.set_pixel(ax + xx, ay + yy, fill)
-                elif co == 16 and ci == 0:
+                elif co == 255 and ci == 0:
                     c.set_pixel(ax + xx, ay + yy, border)
                 else:
-                    c.set_pixel(ax + xx, ay + yy, mix3_color(fill, border, ambient, ci, co))
+                    c.set_pixel(ax + xx, ay + yy, mix3_color_hq(fill, border, ambient, ci, co))
             xx = xx + 1
         yy = yy + 1
 
+# High-resolution (0..255 scale) counterpart to mix_color -- see
+# analytic_coverage's comment for why shape rasterization needs a finer
+# scale than mix_color's 0..16 (which stays exactly as it was, unchanged,
+# because draw_text's baked font atlas genuinely IS 0..16 data and mixing
+# scales there would need re-baking three atlases for no visual benefit --
+# glyphs are small enough that 17 levels was never the limiting factor).
+#
+# Blended in linear light -- see mix_color's own comment for why (same
+# reasoning, same toolkit/render/gamma.tr tables); this is the function
+# that actually blends every rounded corner and circle edge in the
+# toolkit, so it is where gamma-correct blending matters most.
+def mix_color_hq(fg: int, bg: int, coverage: int) -> int:
+    mut fr = srgb_to_linear(red_of(fg))
+    mut fgc = srgb_to_linear(green_of(fg))
+    mut fb = srgb_to_linear(blue_of(fg))
+    mut br = srgb_to_linear(red_of(bg))
+    mut bgc = srgb_to_linear(green_of(bg))
+    mut bb = srgb_to_linear(blue_of(bg))
+    mut r = linear_to_srgb((fr * coverage + br * (255 - coverage) + 128) / 255)
+    mut g = linear_to_srgb((fgc * coverage + bgc * (255 - coverage) + 128) / 255)
+    mut b = linear_to_srgb((fb * coverage + bb * (255 - coverage) + 128) / 255)
+    return rgb(r, g, b)
+
 # Three-way weighted mix for a pixel straddling fill, border ring, and
-# whatever is behind the box. `ci` subsamples landed inside the inner
-# radius, `co` inside the outer; because the two circles are concentric and
-# the inner one is smaller, ci is always a subset of co, so the three weights
-# (ci, co - ci, 16 - co) are non-negative and sum to exactly 16. Same `+ 8`
-# round-to-nearest as mix_color, for the same reason.
-def mix3_color(fill: int, border: int, ambient: int, ci: int, co: int) -> int:
+# whatever is behind the box -- same shape as the original mix3_color, just
+# on mix_color_hq's 0..255 scale and blended in the same linear light. `ci`
+# is the inner radius's analytic coverage, `co` the outer's; because the
+# two circles are concentric and the inner one is smaller, ci is always
+# <= co, so the three weights (ci, co - ci, 255 - co) are non-negative and
+# sum to exactly 255.
+def mix3_color_hq(fill: int, border: int, ambient: int, ci: int, co: int) -> int:
     mut wf = ci
     mut wb = co - ci
-    mut wa = 16 - co
-    mut r = (red_of(fill) * wf + red_of(border) * wb + red_of(ambient) * wa + 8) / 16
-    mut g = (green_of(fill) * wf + green_of(border) * wb + green_of(ambient) * wa + 8) / 16
-    mut b = (blue_of(fill) * wf + blue_of(border) * wb + blue_of(ambient) * wa + 8) / 16
+    mut wa = 255 - co
+    mut flr = srgb_to_linear(red_of(fill))
+    mut flg = srgb_to_linear(green_of(fill))
+    mut flb = srgb_to_linear(blue_of(fill))
+    mut bor = srgb_to_linear(red_of(border))
+    mut bog = srgb_to_linear(green_of(border))
+    mut bob = srgb_to_linear(blue_of(border))
+    mut amr = srgb_to_linear(red_of(ambient))
+    mut amg = srgb_to_linear(green_of(ambient))
+    mut amb = srgb_to_linear(blue_of(ambient))
+    mut r = linear_to_srgb((flr * wf + bor * wb + amr * wa + 128) / 255)
+    mut g = linear_to_srgb((flg * wf + bog * wb + amg * wa + 128) / 255)
+    mut b = linear_to_srgb((flb * wf + bob * wb + amb * wa + 128) / 255)
     return rgb(r, g, b)
 
 # Draws one line of text at the baked font's cell size, top-left anchored at
@@ -734,38 +766,31 @@ pub def fill_circle(c: Canvas, cx: int, cy: int, r: int, color: int) -> void:
 # interface (deliberately minimal, see toolkit/render/canvas.tr; the
 # bare-metal/UEFI framebuffer backends are plain write-only memory, they
 # cannot blend even if asked to) -- so this does the blending itself, in
-# Tauraro, before the pixel is ever written: each boundary pixel is
-# supersampled on a 4x4 subgrid, and its OWN color is computed as a
-# straight-line mix between `fg` and the caller-supplied `bg` weighted by how
-# many of those 16 subsamples actually fall inside the circle. A pixel fully
-# inside gets pure `fg`; fully outside is skipped entirely (never touched, so
+# Tauraro, before the pixel is ever written: each boundary pixel's OWN color
+# is computed as a straight-line mix between `fg` and the caller-supplied
+# `bg`, weighted by analytic_coverage() -- a true distance-field ramp, not a
+# supersampled approximation of one (see that function's own comment for why
+# this replaced the original 4x4-subsample version, and RASTERIZER.md
+# section 4b, which specified this exact approach). A pixel fully inside
+# gets pure `fg`; fully outside is skipped entirely (never touched, so
 # whatever was already there -- which had better be `bg`, or close to it --
-# still shows); only the ring of boundary pixels costs the extra 16x work and
-# gets an intermediate shade. This is exactly what real anti-aliasing is
-# doing under the hood, just computed with integer math against a known flat
-# background instead of a hardware alpha blend -- correct as long as `bg`
-# genuinely is the solid color already sitting under this circle (every call
-# site here paints its own flat backdrop first, then the circle on top of
-# it, so that always holds).
+# still shows); only the ring of boundary pixels costs the extra work and
+# gets an intermediate shade. Correct as long as `bg` genuinely is the solid
+# color already sitting under this circle (every call site here paints its
+# own flat backdrop first, then the circle on top of it, so that always
+# holds).
 pub def fill_circle_aa(c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void:
     if r <= 0:
         return
-    # Everything below works in quarter-pixel units (scale factor 4), so a
-    # circle of radius `r` pixels becomes radius `r*4` in this scaled space,
-    # and each subsample sits at an eighth-pixel offset within its own pixel
-    # cell -- integer math throughout, no float anywhere.
-    mut r4 = r * 4
-    mut r4sq = r4 * r4
-
     mut yy = 0 - r - 1
     while yy <= r + 1:
         mut xx = 0 - r - 1
         while xx <= r + 1:
-            mut coverage = pixel_coverage(xx, yy, r4sq)
-            if coverage == 16:
+            mut coverage = analytic_coverage(xx, yy, r)
+            if coverage == 255:
                 c.set_pixel(cx + xx, cy + yy, fg)
             elif coverage > 0:
-                c.set_pixel(cx + xx, cy + yy, mix_color(fg, bg, coverage))
+                c.set_pixel(cx + xx, cy + yy, mix_color_hq(fg, bg, coverage))
             xx = xx + 1
         yy = yy + 1
 
@@ -791,50 +816,72 @@ pub def fill_circle_ring_aa(c: Canvas, cx: int, cy: int, r: int, ring_w: int, fi
         return
 
     mut ir = r - rw
-    mut r4sq = (r * 4) * (r * 4)
-    mut ir4sq = (ir * 4) * (ir * 4)
 
     mut yy = 0 - r - 1
     while yy <= r + 1:
         mut xx = 0 - r - 1
         while xx <= r + 1:
-            mut co = pixel_coverage(xx, yy, r4sq)
+            mut co = analytic_coverage(xx, yy, r)
             if co > 0:
-                mut ci = pixel_coverage(xx, yy, ir4sq)
-                if ci == 16:
+                mut ci = analytic_coverage(xx, yy, ir)
+                if ci == 255:
                     c.set_pixel(cx + xx, cy + yy, fill)
-                elif co == 16 and ci == 0:
+                elif co == 255 and ci == 0:
                     c.set_pixel(cx + xx, cy + yy, ring)
                 else:
-                    c.set_pixel(cx + xx, cy + yy, mix3_color(fill, ring, ambient, ci, co))
+                    c.set_pixel(cx + xx, cy + yy, mix3_color_hq(fill, ring, ambient, ci, co))
             xx = xx + 1
         yy = yy + 1
 
-# How many of a pixel's 4x4=16 subsamples fall within radius-squared `r4sq`
-# (already scaled to quarter-pixel units), for the pixel at offset (xx,yy)
-# from the circle's center. Subsample offsets -3,-1,1,3 (in quarter-pixel
-# units) place four samples per axis at the pixel's 1/8, 3/8, 5/8, 7/8 points
-# -- a standard, cheap, integer-only supersampling grid.
-def pixel_coverage(xx: int, yy: int, r4sq: int) -> int:
-    mut count = 0
-    mut sub_y = 0
-    while sub_y < 4:
-        mut oy = sub_y * 2 - 3
-        mut sy = yy * 4 + oy
-        mut sub_x = 0
-        while sub_x < 4:
-            mut ox = sub_x * 2 - 3
-            mut sx = xx * 4 + ox
-            if sx * sx + sy * sy <= r4sq:
-                count = count + 1
-            sub_x = sub_x + 1
-        sub_y = sub_y + 1
-    return count
+# Analytic (signed-distance-field) coverage for a circle boundary, replacing
+# the toolkit's original 4x4=16-subsample supersampling with a true
+# distance-based ramp -- RASTERIZER.md section 4b specified exactly this,
+# reserving supersampling only for corner radii below ~2px where an SDF
+# visibly rounds off; every shape in this toolkit (radio/switch/slider
+# circles, rounded-rect/box corners) uses a radius well above that, so the
+# hybrid was never actually needed here.
+#
+# No floating point: Math.isqrt (std/math/int.tr, pure integer Newton's
+# method) computes floor(sqrt(dist_sq * 256)), i.e. distance scaled by 16
+# for 1/16-pixel sub-integer precision, keeping this file's own "integer
+# math throughout" rule intact -- portable to the freestanding/bare-metal
+# targets this toolkit also builds for for exactly the reason RASTERIZER.md
+# gives: no FPU dependency.
+#
+# The ramp itself is the standard analytic-AA formula: full coverage at
+# distance <= r - 0.5, zero at distance >= r + 0.5, linear in between (one
+# pixel wide, centered on the true boundary). Returns 0..255, not 0..16 --
+# a continuous distance measurement naturally resolves far more than 17
+# shades, which is what actually removes the visible banding a discrete
+# 4x4 grid leaves around a circle this size, not just a more accurate guess
+# at which of the same 17 buckets a pixel belongs in.
+def analytic_coverage(dx: int, dy: int, r: int) -> int:
+    if r <= 0:
+        return 0
+    mut dist_sq = dx * dx + dy * dy
+    mut dist16 = Math.isqrt(dist_sq * 256)
+    mut r16 = r * 16
+    mut raw = r16 + 8 - dist16
+    if raw <= 0:
+        return 0
+    if raw >= 16:
+        return 255
+    return raw * 255 / 16
 
 # Straight-line per-channel mix of fg and bg, weighted by coverage/16 --
 # coverage==16 (fully inside) is handled as a fast path by the caller and
 # never reaches here; this only ever blends a genuine partial-coverage edge
 # pixel.
+#
+# Blended in LINEAR light (srgb_to_linear in, linear_to_srgb out), not in
+# the raw sRGB-encoded channel values every #hex colour in this toolkit is
+# written in -- averaging gamma-ENCODED bytes directly is a well-known,
+# named rendering bug: it biases every blended edge toward the darker of
+# the two colours, because sRGB encodes light non-linearly. This is what
+# makes naive software antialiasing read as slightly "muddy" next to a
+# real vector renderer (Skia, browsers) even with equally good sampling --
+# see toolkit/render/gamma.tr's own comment for the full reasoning and
+# where the two lookup tables came from.
 #
 # The `+ 8` before the divide is the rounding correction, not decoration:
 # `(x + 2^(n-1)) / 2^n` rounds to nearest where a bare `/ 16` truncates
@@ -844,15 +891,15 @@ def pixel_coverage(xx: int, yy: int, r4sq: int) -> int:
 # (RASTERIZER.md 5d -- the same reason its blend_channel adds 128 before
 # dividing by 255.)
 def mix_color(fg: int, bg: int, coverage: int) -> int:
-    mut fr = red_of(fg)
-    mut fgc = green_of(fg)
-    mut fb = blue_of(fg)
-    mut br = red_of(bg)
-    mut bgc = green_of(bg)
-    mut bb = blue_of(bg)
-    mut r = (fr * coverage + br * (16 - coverage) + 8) / 16
-    mut g = (fgc * coverage + bgc * (16 - coverage) + 8) / 16
-    mut b = (fb * coverage + bb * (16 - coverage) + 8) / 16
+    mut fr = srgb_to_linear(red_of(fg))
+    mut fgc = srgb_to_linear(green_of(fg))
+    mut fb = srgb_to_linear(blue_of(fg))
+    mut br = srgb_to_linear(red_of(bg))
+    mut bgc = srgb_to_linear(green_of(bg))
+    mut bb = srgb_to_linear(blue_of(bg))
+    mut r = linear_to_srgb((fr * coverage + br * (16 - coverage) + 8) / 16)
+    mut g = linear_to_srgb((fgc * coverage + bgc * (16 - coverage) + 8) / 16)
+    mut b = linear_to_srgb((fb * coverage + bb * (16 - coverage) + 8) / 16)
     return rgb(r, g, b)
 
 # Deepest-first hit test: the innermost box containing the point that names a

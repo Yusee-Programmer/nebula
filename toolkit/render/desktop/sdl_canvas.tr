@@ -66,6 +66,9 @@ pub def sdl_window_shown() -> Uint32:
 pub def sdl_renderer_accelerated() -> Uint32:
     return 2 as Uint32
 
+pub def sdl_renderer_presentvsync() -> Uint32:
+    return 4 as Uint32
+
 pub def sdl_quit_event() -> Uint32:
     return 256 as Uint32
 
@@ -90,52 +93,97 @@ pub class SdlCanvas implements Canvas:
     pub w:   int
     pub h:   int
 
+# Shared by SdlCanvas.open()/open_vsync() -- a free function, not another
+# static method on SdlCanvas, so there is no ambiguity about calling one
+# no-`self` associated function from another inside the same `extend` block.
+def sdl_canvas_open_ex(title: str, w: int, h: int, vsync: bool) -> SdlCanvas:
+    mut c = SdlCanvas()
+    c.w = w
+    c.h = h
+    unsafe:
+        # DPI awareness, BEFORE SDL_Init -- this hint is only read during
+        # video-subsystem startup, so setting it afterwards silently does
+        # nothing.
+        #
+        # Without it the process is DPI-unaware, and on any display with a
+        # scale factor above 100% Windows renders the window at the
+        # requested logical size and then BITMAP-STRETCHES the whole
+        # surface up to physical pixels. That stretch is a bilinear
+        # resample of an already-finished frame: it re-blurs every
+        # antialiased corner and every glyph edge the rasterizer just
+        # spent 16 subsamples per pixel computing, which is a strange way
+        # to spend that work. It also makes the window's real on-screen
+        # footprint larger than the size asked for, which is what an
+        # earlier session saw and (correctly) guessed at but did not fix.
+        #
+        # "permonitorv2" is the modern behavior: 1 SDL pixel == 1 physical
+        # pixel, no stretch, and the scale factor re-negotiated when the
+        # window moves between monitors of different DPI. The hint is
+        # Windows-only and simply ignored elsewhere, so this stays a
+        # single unconditional call rather than a platform branch.
+        SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS" as Pointer[char], "permonitorv2" as Pointer[char])
+
+        mut rc = SDL_Init(sdl_init_video())
+        if rc != 0:
+            c.win = 0 as Pointer[SDL_Window]
+            c.ren = 0 as Pointer[SDL_Renderer]
+            return c
+
+        mut cw = w as c_int
+        mut ch = h as c_int
+        c.win = SDL_CreateWindow(title as Pointer[char], sdl_windowpos_undefined(), sdl_windowpos_undefined(), cw, ch, sdl_window_shown())
+        if (c.win as usize) == (0 as usize):
+            c.ren = 0 as Pointer[SDL_Renderer]
+            return c
+
+        # ACCELERATED (2) and PRESENTVSYNC (4) are distinct bits, so addition
+        # combines them exactly like a bitwise OR would -- used instead of
+        # `|` since nothing else in this codebase relies on that operator
+        # being defined for Uint32, and this avoids being the first.
+        mut flags = sdl_renderer_accelerated()
+        if vsync:
+            flags = flags + sdl_renderer_presentvsync()
+        c.ren = SDL_CreateRenderer(c.win, 0 - 1, flags)
+    return c
+
 extend SdlCanvas:
     # Opens a real window. Returns a canvas with `win` NULL on failure (SDL_Init
     # or window/renderer creation failed) -- callers should check `.ok()` before
     # using it; nothing here crashes on a null handle, but nothing draws either.
+    #
+    # No PRESENTVSYNC: bench_render.tr measures raw per-frame cost through this
+    # exact call (proposal-v4-renderer-architecture.md section 5a's recorded
+    # numbers -- "219 fps" etc. -- depend on nothing capping the frame rate),
+    # so changing this default would quietly invalidate that measurement.
+    # Interactive demos that want a tear-free, evenly-paced loop should use
+    # open_vsync() instead (see its own comment for why an uncapped loop with
+    # a fixed post-frame SDL_Delay is worse than either extreme alone).
     pub def open(title: str, w: int, h: int) -> SdlCanvas:
-        mut c = SdlCanvas()
-        c.w = w
-        c.h = h
-        unsafe:
-            # DPI awareness, BEFORE SDL_Init -- this hint is only read during
-            # video-subsystem startup, so setting it afterwards silently does
-            # nothing.
-            #
-            # Without it the process is DPI-unaware, and on any display with a
-            # scale factor above 100% Windows renders the window at the
-            # requested logical size and then BITMAP-STRETCHES the whole
-            # surface up to physical pixels. That stretch is a bilinear
-            # resample of an already-finished frame: it re-blurs every
-            # antialiased corner and every glyph edge the rasterizer just
-            # spent 16 subsamples per pixel computing, which is a strange way
-            # to spend that work. It also makes the window's real on-screen
-            # footprint larger than the size asked for, which is what an
-            # earlier session saw and (correctly) guessed at but did not fix.
-            #
-            # "permonitorv2" is the modern behavior: 1 SDL pixel == 1 physical
-            # pixel, no stretch, and the scale factor re-negotiated when the
-            # window moves between monitors of different DPI. The hint is
-            # Windows-only and simply ignored elsewhere, so this stays a
-            # single unconditional call rather than a platform branch.
-            SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS" as Pointer[char], "permonitorv2" as Pointer[char])
+        return sdl_canvas_open_ex(title, w, h, false)
 
-            mut rc = SDL_Init(sdl_init_video())
-            if rc != 0:
-                c.win = 0 as Pointer[SDL_Window]
-                c.ren = 0 as Pointer[SDL_Renderer]
-                return c
-
-            mut cw = w as c_int
-            mut ch = h as c_int
-            c.win = SDL_CreateWindow(title as Pointer[char], sdl_windowpos_undefined(), sdl_windowpos_undefined(), cw, ch, sdl_window_shown())
-            if (c.win as usize) == (0 as usize):
-                c.ren = 0 as Pointer[SDL_Renderer]
-                return c
-
-            c.ren = SDL_CreateRenderer(c.win, 0 - 1, sdl_renderer_accelerated())
-        return c
+    # Same as open(), but the renderer also gets SDL_RENDERER_PRESENTVSYNC.
+    # Without it, SDL_RenderPresent() returns immediately and a loop has to
+    # pace itself with something like SDL_Delay(16) to avoid pegging a core
+    # at an unbounded frame rate -- examples/widgets_demo did exactly that.
+    # Two real, distinct problems follow from an uncapped present under a
+    # fixed post-frame delay, not one: (1) RenderPresent with no vsync can
+    # hand the compositor a buffer mid-scanout, which showed up as visible
+    # tearing during an active drag (half a frame's colour, half the
+    # previous one -- confirmed by a rapid burst-capture during a slider
+    # drag); (2) SDL_Delay(16) after a present that ALSO returns immediately
+    # means the delay is the only thing pacing the loop, so the tiniest bit
+    # of extra work in some frames (e.g. the occasional full-scene repaint
+    # under diffing, see render_diff_to()) does not push the frame later --
+    # it just makes that frame's real (work + 16ms) length longer than the
+    # next one's, an UNEVEN cadence a human eye actually notices as jank
+    # even though every individual frame drew correctly. PRESENTVSYNC fixes
+    # both by blocking the present call itself until the next vblank: no
+    # partial buffer is ever shown, and every frame is paced to the display
+    # refresh regardless of how much work it did -- the caller should drop
+    # its own SDL_Delay once using this, or the two paces stack and roughly
+    # halve the frame rate.
+    pub def open_vsync(title: str, w: int, h: int) -> SdlCanvas:
+        return sdl_canvas_open_ex(title, w, h, true)
 
     pub def ok(self) -> bool:
         unsafe:

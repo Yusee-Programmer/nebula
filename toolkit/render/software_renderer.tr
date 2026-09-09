@@ -1,0 +1,62 @@
+# toolkit.render.software_renderer — the Renderer every backend gets by
+# default (proposal v6, phase 1).
+#
+# A thin pass-through to toolkit.ui.interp's existing rasterizer functions --
+# the exact same analytic-coverage, gamma-correct-blended code every widget
+# already called directly, just reachable through Renderer now too. Nothing
+# about how a shape is drawn changes; only WHERE the call goes. This is what
+# makes phase 1 verifiable as "pixel-identical to before": every
+# verified-examples/*.tr test re-runs unchanged, because SoftwareRenderer's
+# own methods do exactly what the direct calls they replace did.
+#
+# Layering note: this file reaches UP into toolkit.ui.interp for the actual
+# math, which is backwards from the usual toolkit.render-is-below-toolkit.ui
+# direction -- accepted for phase 1 rather than moving ~400 lines of
+# rasterizer code down into toolkit.render (a real, separate refactor with
+# its own regression risk) to get a widget-facing seam in place quickly.
+# Revisit if/when phase 2's GLRenderer needs the analytic-coverage math
+# reachable without depending on the UI layer.
+
+from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.text.font import Font
+from toolkit.ui.interp import paint_rounded_rect_aa, paint_rounded_box_aa, fill_circle_aa, fill_circle_ring_aa, draw_text
+
+pub class SoftwareRenderer implements Renderer:
+    _unused: int
+
+extend SoftwareRenderer:
+    pub def init() -> SoftwareRenderer:
+        mut r = SoftwareRenderer()
+        r._unused = 0
+        return r
+
+    pub def rounded_rect(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, fg: int, bg: int) -> void:
+        paint_rounded_rect_aa(c, x, y, w, h, radius, fg, bg)
+
+    pub def rounded_box(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, border: int, ambient: int) -> void:
+        paint_rounded_box_aa(c, x, y, w, h, radius, border_w, fill, border, ambient)
+
+    pub def circle(self, c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void:
+        fill_circle_aa(c, cx, cy, r, fg, bg)
+
+    pub def circle_ring(self, c: Canvas, cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> void:
+        fill_circle_ring_aa(c, cx, cy, r, ring_w, fill, ring, ambient)
+
+    pub def text(self, c: Canvas, font: Font, s: str, x: int, y: int, fg: int, bg: int) -> void:
+        draw_text(c, font, s, x, y, fg, bg)
+
+# A real compiler gap, found wiring this up: assigning a concrete class
+# value directly to a field declared with an INTERFACE type
+# (`w.renderer = SoftwareRenderer.init()`, where `renderer: Renderer`)
+# fails to compile ("incompatible types ... from type 'SoftwareRenderer *'")
+# -- the generated C wants the interface's fat-pointer representation, and a
+# bare class pointer isn't one. Routing the SAME value through a function
+# whose OWN return type is declared as the interface (this one) compiles
+# and runs correctly; the wrap apparently only happens at a parameter/return
+# type boundary, not a plain field assignment. Confirmed with a two-class
+# minimal repro before writing this. Not fixed in the compiler this
+# session -- every widget's `.init()` calls THIS function instead of
+# `SoftwareRenderer.init()` directly to get a default `renderer`.
+pub def default_renderer() -> Renderer:
+    return SoftwareRenderer.init()

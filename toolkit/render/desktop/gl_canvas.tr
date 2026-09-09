@@ -1,0 +1,530 @@
+# toolkit.render.desktop.gl_canvas — GPU-accelerated Canvas + Renderer for
+# desktop, via a real OpenGL 3.3 core context (proposal-v6 phase 2).
+#
+# One class implements BOTH interfaces, sharing one GL context/shader/VBO
+# state, because Canvas.fill_rect and Renderer.rounded_rect turn out to be
+# the SAME underlying GPU primitive: a single quad, filled via a signed-
+# distance-field fragment shader, with `radius = 0` degenerating exactly to
+# a flat rect. `circle`/`circle_ring` are that same primitive too, with a
+# bounding box sized so the radius is maximal (a circle IS a maximally-
+# rounded square) -- so this whole renderer boils down to ONE draw call
+# shape (rounded_rect) plus a two-pass border variant (rounded_box: draw the
+# border-colored shape, then a smaller inset fill-colored shape on top) and
+# a textured-quad variant for glyphs. Four Renderer methods, one shader.
+#
+# This is what proposal-v6 phase 2 wanted and the software path structurally
+# could not have: REAL hardware alpha blending compositing each shape
+# against whatever is actually behind it (destination read-back is exactly
+# what a GPU blend unit does), instead of software's hand-rolled fg/bg/
+# ambient three-way mix that has to be TOLD what's behind a shape because it
+# has no way to read it back. GL_FRAMEBUFFER_SRGB does the same job
+# toolkit/render/gamma.tr's LUTs do -- blend in linear light, store sRGB --
+# just in hardware, every pixel, for free.
+#
+# Depends on the `Pointer[void] as def(...)->...` compiler fix (2026-09-09):
+# every non-1.1 GL function is resolved at runtime via SDL_GL_GetProcAddress
+# (toolkit/render/desktop/gl_bindings.tr), which returns a raw function
+# pointer with no closure/env -- uncallable before that fix landed.
+
+from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.caps import Caps
+from toolkit.render.gamma import srgb_to_linear
+from toolkit.text.font import Font
+from toolkit.types import red_of, green_of, blue_of
+from string.str import Str
+
+from toolkit.render.desktop.sdl_bindings import SDL_Window, SDL_GLContext, SDL_GLattr
+from toolkit.render.desktop.sdl_bindings import SDL_Init, SDL_Quit, SDL_CreateWindow, SDL_DestroyWindow
+from toolkit.render.desktop.sdl_bindings import SDL_GL_SetAttribute, SDL_GL_CreateContext, SDL_GL_MakeCurrent
+from toolkit.render.desktop.sdl_bindings import SDL_GL_SetSwapInterval, SDL_GL_SwapWindow, SDL_GL_DeleteContext
+from toolkit.render.desktop.sdl_bindings import SDL_SetHint
+
+from toolkit.render.desktop.gl_bindings import GlFns, load_gl_fns
+from toolkit.render.desktop.gl_bindings import GLenum, GLboolean, GLbitfield, GLint, GLsizei, GLuint, GLfloat, GLchar
+from toolkit.render.desktop.gl_bindings import gl_color_buffer_bit, gl_triangles, gl_float, gl_false, gl_true
+from toolkit.render.desktop.gl_bindings import gl_array_buffer, gl_static_draw, gl_vertex_shader, gl_fragment_shader
+from toolkit.render.desktop.gl_bindings import gl_compile_status, gl_link_status, gl_blend, gl_src_alpha
+from toolkit.render.desktop.gl_bindings import gl_one_minus_src_alpha, gl_texture_2d, gl_red, gl_unsigned_byte
+from toolkit.render.desktop.gl_bindings import gl_texture_min_filter, gl_texture_mag_filter, gl_linear
+from toolkit.render.desktop.gl_bindings import gl_texture_wrap_s, gl_texture_wrap_t, gl_clamp_to_edge
+from toolkit.render.desktop.gl_bindings import gl_texture0, gl_framebuffer_srgb, gl_unpack_alignment
+
+# --- SDL GL-context-setup constants -- same "small stable wrapper function"
+# convention sdl_canvas.tr uses for its own ABI constants (see that file's
+# own comment on why: these are fixed by the SDL2 ABI, not worth a bindgen
+# round-trip dependency). SDL_GLattr values from SDL_video.h's SDL_GLattr enum;
+# SDL_GLprofile values from the same header's SDL_GLprofile enum.
+pub def sdl_gl_context_major_version() -> SDL_GLattr: return 17 as SDL_GLattr
+pub def sdl_gl_context_minor_version() -> SDL_GLattr: return 18 as SDL_GLattr
+pub def sdl_gl_context_profile_mask() -> SDL_GLattr: return 21 as SDL_GLattr
+pub def sdl_gl_context_profile_core() -> c_int: return 1
+pub def sdl_gl_doublebuffer() -> SDL_GLattr: return 5 as SDL_GLattr
+pub def sdl_gl_framebuffer_srgb_capable() -> SDL_GLattr: return 23 as SDL_GLattr
+pub def sdl_window_opengl_shown() -> Uint32: return 6 as Uint32
+pub def sdl_windowpos_undefined_gl() -> c_int: return 0x1FFF0000
+
+# Proposal v4 step B / v6 phase 2: this backend's own capability query, next
+# to the concrete Canvas type it describes -- same convention sdl_canvas.tr's
+# own `caps()` follows (see toolkit/render/caps.tr's header for why `caps()`
+# is per-module rather than a Canvas interface method).
+pub def caps() -> Caps:
+    return Caps.gl()
+
+pub class GlCanvas implements Canvas, Renderer:
+    pub win:   Pointer[SDL_Window]
+    pub glctx: SDL_GLContext
+    pub w:     int
+    pub h:     int
+    pub fns:   GlFns
+
+    pub shape_prog:      GLuint
+    pub shape_u_screen:  GLint
+    pub shape_u_rect:    GLint
+    pub shape_u_radius:  GLint
+    pub shape_u_color:   GLint
+    pub shape_u_alpha:   GLint
+
+    pub text_prog:       GLuint
+    pub text_u_screen:   GLint
+    pub text_u_rect:     GLint
+    pub text_u_uv:       GLint
+    pub text_u_color:    GLint
+    pub text_u_tex:      GLint
+
+    pub vao: GLuint
+    pub vbo: GLuint
+
+    # Three baked atlases (toolkit.text.font.Font.load_size(sm/base/lg)),
+    # uploaded once at open() time. `text()` matches an incoming Font by
+    # cell_w (6/8/10 -- see toolkit/text/font_data{,_sm,_lg}.tr, distinct
+    # per size, the only identity a Font value carries).
+    pub tex_sm:   GLuint
+    pub tex_base: GLuint
+    pub tex_lg:   GLuint
+    pub cw_sm:    int
+    pub ch_sm:    int
+    pub gc_sm:    int
+    pub cw_base:  int
+    pub ch_base:  int
+    pub gc_base:  int
+    pub cw_lg:    int
+    pub ch_lg:    int
+    pub gc_lg:    int
+
+# --- shader sources -----------------------------------------------------
+
+def shape_vs_src() -> str:
+    return """#version 330 core
+layout(location = 0) in vec2 aPos;
+uniform vec2 uScreen;
+uniform vec4 uRect;
+out vec2 vLocal;
+void main() {
+    vec2 px = uRect.xy + aPos * uRect.zw;
+    vLocal = aPos * uRect.zw;
+    vec2 ndc = vec2(px.x / uScreen.x * 2.0 - 1.0, 1.0 - px.y / uScreen.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+"""
+
+def shape_fs_src() -> str:
+    return """#version 330 core
+in vec2 vLocal;
+uniform vec4 uRect;
+uniform float uRadius;
+uniform vec3 uColor;
+uniform float uAlpha;
+out vec4 FragColor;
+float roundedBoxSDF(vec2 p, vec2 halfSize, float r) {
+    vec2 q = abs(p) - halfSize + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+void main() {
+    vec2 halfSize = uRect.zw * 0.5;
+    vec2 p = vLocal - halfSize;
+    float d = roundedBoxSDF(p, halfSize, uRadius);
+    float coverage = clamp(0.5 - d, 0.0, 1.0);
+    FragColor = vec4(uColor, coverage * uAlpha);
+}
+"""
+
+def text_vs_src() -> str:
+    return """#version 330 core
+layout(location = 0) in vec2 aPos;
+uniform vec2 uScreen;
+uniform vec4 uRect;
+uniform vec4 uUV;
+out vec2 vUV;
+void main() {
+    vec2 px = uRect.xy + aPos * uRect.zw;
+    vUV = mix(uUV.xy, uUV.zw, aPos);
+    vec2 ndc = vec2(px.x / uScreen.x * 2.0 - 1.0, 1.0 - px.y / uScreen.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+"""
+
+def text_fs_src() -> str:
+    return """#version 330 core
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform vec3 uColor;
+out vec4 FragColor;
+void main() {
+    float coverage = texture(uTex, vUV).r;
+    FragColor = vec4(uColor, coverage);
+}
+"""
+
+# --- shader/program compilation ------------------------------------------
+
+def compile_shader(fns: GlFns, kind: GLenum, src: str) -> GLuint:
+    unsafe:
+        mut sh = fns.glCreateShader(kind)
+        mut srcp: Pointer[char] = src as Pointer[char]
+        fns.glShaderSource(sh, 1 as GLsizei, (&srcp) as Pointer[Pointer[GLchar]], 0 as Pointer[GLint])
+        fns.glCompileShader(sh)
+        mut status: GLint = 0
+        fns.glGetShaderiv(sh, gl_compile_status(), (&status) as Pointer[GLint])
+        if status == 0:
+            mut logbuf = alloc[GLchar](1024)
+            fns.glGetShaderInfoLog(sh, 1024 as GLsizei, 0 as Pointer[GLsizei], logbuf)
+            print("GL shader compile error:")
+            print(logbuf as str)
+        return sh
+
+def link_program(fns: GlFns, vs: GLuint, fs: GLuint) -> GLuint:
+    unsafe:
+        mut prog = fns.glCreateProgram()
+        fns.glAttachShader(prog, vs)
+        fns.glAttachShader(prog, fs)
+        fns.glLinkProgram(prog)
+        mut status: GLint = 0
+        fns.glGetProgramiv(prog, gl_link_status(), (&status) as Pointer[GLint])
+        if status == 0:
+            mut logbuf = alloc[GLchar](1024)
+            fns.glGetProgramInfoLog(prog, 1024 as GLsizei, 0 as Pointer[GLsizei], logbuf)
+            print("GL program link error:")
+            print(logbuf as str)
+        fns.glDeleteShader(vs)
+        fns.glDeleteShader(fs)
+        return prog
+
+# --- font atlas upload -----------------------------------------------------
+
+# Packs a Font's coverage bytes (already [glyph_idx][row][col], 0-16 scale --
+# see toolkit/text/font_data.tr's own comment) into one GL_RED texture,
+# width = cell_w, height = cell_h * glyph_count (glyphs stacked vertically),
+# scaled up to a full 0-255 byte range since GL_RED/GL_UNSIGNED_BYTE has no
+# native 0-16 format.
+def upload_font_atlas(fns: GlFns, font: Font) -> GLuint:
+    mut cw = font.cell_w()
+    mut ch = font.cell_h()
+    mut gc = font.glyph_count_v
+    mut total = cw * ch * gc
+    unsafe:
+        mut buf = alloc[u8](total as usize)
+        mut i = 0
+        while i < total:
+            mut v16 = font.coverage[i] as int
+            mut v255 = v16 * 255 / 16
+            buf.offset(i).write(v255 as u8)
+            i = i + 1
+
+        mut texv = alloc[GLuint](1)
+        fns.glGenTextures(1 as GLsizei, texv)
+        mut tex = texv.read()
+        fns.glPixelStorei(gl_unpack_alignment(), 1)
+        fns.glBindTexture(gl_texture_2d(), tex)
+        fns.glTexImage2D(gl_texture_2d(), 0 as GLint, gl_red() as GLint, cw as GLsizei, (ch * gc) as GLsizei, 0 as GLint, gl_red(), gl_unsigned_byte(), buf as Pointer[void])
+        fns.glTexParameteri(gl_texture_2d(), gl_texture_min_filter(), gl_linear() as GLint)
+        fns.glTexParameteri(gl_texture_2d(), gl_texture_mag_filter(), gl_linear() as GLint)
+        fns.glTexParameteri(gl_texture_2d(), gl_texture_wrap_s(), gl_clamp_to_edge() as GLint)
+        fns.glTexParameteri(gl_texture_2d(), gl_texture_wrap_t(), gl_clamp_to_edge() as GLint)
+        return tex
+
+# --- open / close ----------------------------------------------------------
+
+pub def gl_canvas_open(title: str, w: int, h: int) -> GlCanvas:
+    mut c = GlCanvas()
+    c.w = w
+    c.h = h
+    unsafe:
+        SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS" as Pointer[char], "permonitorv2" as Pointer[char])
+
+        mut rc = SDL_Init(0x00000020 as Uint32)
+        if rc != 0:
+            c.win = 0 as Pointer[SDL_Window]
+            c.glctx = 0 as SDL_GLContext
+            return c
+
+        SDL_GL_SetAttribute(sdl_gl_context_major_version(), 3)
+        SDL_GL_SetAttribute(sdl_gl_context_minor_version(), 3)
+        SDL_GL_SetAttribute(sdl_gl_context_profile_mask(), sdl_gl_context_profile_core())
+        SDL_GL_SetAttribute(sdl_gl_doublebuffer(), 1)
+        SDL_GL_SetAttribute(sdl_gl_framebuffer_srgb_capable(), 1)
+
+        mut cw = w as c_int
+        mut ch = h as c_int
+        c.win = SDL_CreateWindow(title as Pointer[char], sdl_windowpos_undefined_gl(), sdl_windowpos_undefined_gl(), cw, ch, sdl_window_opengl_shown())
+        if (c.win as usize) == (0 as usize):
+            c.glctx = 0 as SDL_GLContext
+            return c
+
+        c.glctx = SDL_GL_CreateContext(c.win)
+        if (c.glctx as usize) == (0 as usize):
+            return c
+        SDL_GL_MakeCurrent(c.win, c.glctx)
+        SDL_GL_SetSwapInterval(1)
+
+        c.fns = load_gl_fns()
+        c.fns.glEnable(gl_blend())
+        c.fns.glBlendFunc(gl_src_alpha(), gl_one_minus_src_alpha())
+        c.fns.glEnable(gl_framebuffer_srgb())
+        c.fns.glViewport(0 as GLint, 0 as GLint, w as GLsizei, h as GLsizei)
+
+        # Shared unit-quad VBO (two triangles covering [0,1]x[0,1]), one VAO.
+        mut vaov = alloc[GLuint](1)
+        c.fns.glGenVertexArrays(1 as GLsizei, vaov)
+        c.vao = vaov.read()
+        c.fns.glBindVertexArray(c.vao)
+
+        mut quad: [f32; 12]
+        quad[0] = 0.0 as f32
+        quad[1] = 0.0 as f32
+        quad[2] = 1.0 as f32
+        quad[3] = 0.0 as f32
+        quad[4] = 0.0 as f32
+        quad[5] = 1.0 as f32
+        quad[6] = 0.0 as f32
+        quad[7] = 1.0 as f32
+        quad[8] = 1.0 as f32
+        quad[9] = 0.0 as f32
+        quad[10] = 1.0 as f32
+        quad[11] = 1.0 as f32
+
+        mut vbov = alloc[GLuint](1)
+        c.fns.glGenBuffers(1 as GLsizei, vbov)
+        c.vbo = vbov.read()
+        c.fns.glBindBuffer(gl_array_buffer(), c.vbo)
+        c.fns.glBufferData(gl_array_buffer(), 48 as usize, quad.as_ptr() as Pointer[void], gl_static_draw())
+        c.fns.glVertexAttribPointer(0 as GLuint, 2 as GLint, gl_float(), gl_false(), 8 as GLsizei, 0 as Pointer[void])
+        c.fns.glEnableVertexAttribArray(0 as GLuint)
+
+        mut svs = compile_shader(c.fns, gl_vertex_shader(), shape_vs_src())
+        mut sfs = compile_shader(c.fns, gl_fragment_shader(), shape_fs_src())
+        c.shape_prog = link_program(c.fns, svs, sfs)
+        c.shape_u_screen = c.fns.glGetUniformLocation(c.shape_prog, "uScreen" as Pointer[char])
+        c.shape_u_rect = c.fns.glGetUniformLocation(c.shape_prog, "uRect" as Pointer[char])
+        c.shape_u_radius = c.fns.glGetUniformLocation(c.shape_prog, "uRadius" as Pointer[char])
+        c.shape_u_color = c.fns.glGetUniformLocation(c.shape_prog, "uColor" as Pointer[char])
+        c.shape_u_alpha = c.fns.glGetUniformLocation(c.shape_prog, "uAlpha" as Pointer[char])
+
+        mut tvs = compile_shader(c.fns, gl_vertex_shader(), text_vs_src())
+        mut tfs = compile_shader(c.fns, gl_fragment_shader(), text_fs_src())
+        c.text_prog = link_program(c.fns, tvs, tfs)
+        c.text_u_screen = c.fns.glGetUniformLocation(c.text_prog, "uScreen" as Pointer[char])
+        c.text_u_rect = c.fns.glGetUniformLocation(c.text_prog, "uRect" as Pointer[char])
+        c.text_u_uv = c.fns.glGetUniformLocation(c.text_prog, "uUV" as Pointer[char])
+        c.text_u_color = c.fns.glGetUniformLocation(c.text_prog, "uColor" as Pointer[char])
+        c.text_u_tex = c.fns.glGetUniformLocation(c.text_prog, "uTex" as Pointer[char])
+
+        mut f_sm = Font.load_size(0)
+        mut f_base = Font.load_size(1)
+        mut f_lg = Font.load_size(2)
+        c.cw_sm = f_sm.cell_w_v
+        c.ch_sm = f_sm.cell_h_v
+        c.gc_sm = f_sm.glyph_count_v
+        c.cw_base = f_base.cell_w_v
+        c.ch_base = f_base.cell_h_v
+        c.gc_base = f_base.glyph_count_v
+        c.cw_lg = f_lg.cell_w_v
+        c.ch_lg = f_lg.cell_h_v
+        c.gc_lg = f_lg.glyph_count_v
+        c.tex_sm = upload_font_atlas(c.fns, f_sm)
+        c.tex_base = upload_font_atlas(c.fns, f_base)
+        c.tex_lg = upload_font_atlas(c.fns, f_lg)
+    return c
+
+extend GlCanvas:
+    pub def ok(self) -> bool:
+        unsafe:
+            return (self.win as usize) != (0 as usize) and (self.glctx as usize) != (0 as usize)
+
+    pub def width(self) -> int:
+        return self.w
+
+    pub def height(self) -> int:
+        return self.h
+
+    pub def present(self) -> void:
+        unsafe:
+            SDL_GL_SwapWindow(self.win)
+
+    pub def close(self) -> void:
+        unsafe:
+            if (self.glctx as usize) != (0 as usize):
+                SDL_GL_DeleteContext(self.glctx)
+            if (self.win as usize) != (0 as usize):
+                SDL_DestroyWindow(self.win)
+            SDL_Quit()
+
+    pub def clear(self, color: int) -> void:
+        mut r = srgb_to_linear(red_of(color)) as f32 / 255.0 as f32
+        mut g = srgb_to_linear(green_of(color)) as f32 / 255.0 as f32
+        mut b = srgb_to_linear(blue_of(color)) as f32 / 255.0 as f32
+        unsafe:
+            self.fns.glClearColor(r as GLfloat, g as GLfloat, b as GLfloat, 1.0 as GLfloat)
+            self.fns.glClear(gl_color_buffer_bit())
+
+    # A soft drop shadow -- same six-layer concentric/offset/fading approach
+    # SdlCanvas.draw_shadow uses (see that method's own comment for why: a
+    # cheap CSS-box-shadow-style approximation, not a real Gaussian blur),
+    # except each layer is a real ROUNDED, antialiased GPU draw (this
+    # backend's SDF shape primitive) instead of SDL's flat square-cornered
+    # rect -- free here, where SdlCanvas deliberately skipped it ("square
+    # corners under a blurred, faded edge read as soft anyway... avoids
+    # reaching up into toolkit.ui.interp"). `radius` is the shadowed panel's
+    # own corner radius, so the shadow's rounding matches what it sits under.
+    pub def draw_shadow(self, x: int, y: int, w: int, h: int, radius: int) -> void:
+        mut layers = 6
+        mut i = 0
+        while i < layers:
+            mut spread = i + 1
+            mut alpha = 60 - i * 9
+            if alpha < 0:
+                alpha = 0
+            mut am = alpha as f32 / 255.0 as f32
+            self.draw_shape(x - spread + 3, y - spread + 5, w + spread * 2, h + spread * 2, radius, 0x02060F, am)
+            i = i + 1
+
+    # The one real GPU draw primitive every shape method below composes:
+    # a unit quad, positioned/sized by uRect, filled via the rounded-box SDF
+    # shader with `radius`/`color`/`alpha_mult`, real-alpha-blended against
+    # whatever is already in the framebuffer.
+    def draw_shape(self, x: int, y: int, w: int, h: int, radius: int, color: int, alpha_mult: f32) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        mut r = radius
+        if r < 0:
+            r = 0
+        if r * 2 > w:
+            r = w / 2
+        if r * 2 > h:
+            r = h / 2
+        mut cr = srgb_to_linear(red_of(color)) as f32 / 255.0 as f32
+        mut cg = srgb_to_linear(green_of(color)) as f32 / 255.0 as f32
+        mut cb = srgb_to_linear(blue_of(color)) as f32 / 255.0 as f32
+        unsafe:
+            self.fns.glUseProgram(self.shape_prog)
+            self.fns.glBindVertexArray(self.vao)
+            self.fns.glUniform2f(self.shape_u_screen, self.w as GLfloat, self.h as GLfloat)
+            self.fns.glUniform4f(self.shape_u_rect, x as GLfloat, y as GLfloat, w as GLfloat, h as GLfloat)
+            self.fns.glUniform1f(self.shape_u_radius, r as GLfloat)
+            self.fns.glUniform3f(self.shape_u_color, cr as GLfloat, cg as GLfloat, cb as GLfloat)
+            self.fns.glUniform1f(self.shape_u_alpha, alpha_mult as GLfloat)
+            self.fns.glDrawArrays(gl_triangles(), 0 as GLint, 6 as GLsizei)
+
+    pub def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> void:
+        self.draw_shape(x, y, w, h, 0, color, 1.0 as f32)
+
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        mut am = alpha as f32 / 255.0 as f32
+        self.draw_shape(x, y, w, h, 0, color, am)
+
+    pub def set_pixel(self, x: int, y: int, color: int) -> void:
+        self.draw_shape(x, y, 1, 1, 0, color, 1.0 as f32)
+
+    # --- Renderer -----------------------------------------------------------
+
+    pub def rounded_rect(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, fg: int, bg: int) -> void:
+        self.draw_shape(x, y, w, h, radius, fg, 1.0 as f32)
+
+    pub def rounded_box(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, border: int, ambient: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        mut r = radius
+        if r < 0:
+            r = 0
+        if r * 2 > w:
+            r = w / 2
+        if r * 2 > h:
+            r = h / 2
+        mut b = border_w
+        if b < 0:
+            b = 0
+        if b == 0:
+            self.draw_shape(x, y, w, h, r, fill, 1.0 as f32)
+            return
+        if b * 2 >= w or b * 2 >= h:
+            self.draw_shape(x, y, w, h, r, border, 1.0 as f32)
+            return
+        self.draw_shape(x, y, w, h, r, border, 1.0 as f32)
+        mut ir = r - b
+        if ir < 0:
+            ir = 0
+        self.draw_shape(x + b, y + b, w - b * 2, h - b * 2, ir, fill, 1.0 as f32)
+
+    pub def circle(self, c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void:
+        self.draw_shape(cx - r, cy - r, r * 2, r * 2, r, fg, 1.0 as f32)
+
+    pub def circle_ring(self, c: Canvas, cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> void:
+        self.rounded_box(c, cx - r, cy - r, r * 2, r * 2, r, ring_w, fill, ring, ambient)
+
+    pub def text(self, c: Canvas, font: Font, txt: str, x: int, y: int, fg: int, bg: int) -> void:
+        mut tex = self.tex_base
+        mut cw = self.cw_base
+        mut ch = self.ch_base
+        mut gc = self.gc_base
+        if font.cell_w_v == self.cw_sm:
+            tex = self.tex_sm
+            cw = self.cw_sm
+            ch = self.ch_sm
+            gc = self.gc_sm
+        elif font.cell_w_v == self.cw_lg:
+            tex = self.tex_lg
+            cw = self.cw_lg
+            ch = self.ch_lg
+            gc = self.gc_lg
+
+        mut first = font.first_char_v
+        mut cr = srgb_to_linear(red_of(fg)) as f32 / 255.0 as f32
+        mut cg = srgb_to_linear(green_of(fg)) as f32 / 255.0 as f32
+        mut cb = srgb_to_linear(blue_of(fg)) as f32 / 255.0 as f32
+        mut total_h = (ch * gc) as f32
+
+        unsafe:
+            self.fns.glUseProgram(self.text_prog)
+            self.fns.glBindVertexArray(self.vao)
+            self.fns.glActiveTexture(gl_texture0())
+            self.fns.glBindTexture(gl_texture_2d(), tex)
+            self.fns.glUniform1i(self.text_u_tex, 0)
+            self.fns.glUniform2f(self.text_u_screen, self.w as GLfloat, self.h as GLfloat)
+            self.fns.glUniform3f(self.text_u_color, cr as GLfloat, cg as GLfloat, cb as GLfloat)
+
+            mut n = Str.len(txt)
+            mut i = 0
+            while i < n:
+                mut codepoint = Str.char_at(txt, i)
+                mut idx = codepoint - first
+                if idx >= 0 and idx < gc:
+                    mut v0 = (idx * ch) as f32 / total_h
+                    mut v1 = ((idx + 1) * ch) as f32 / total_h
+                    self.fns.glUniform4f(self.text_u_rect, (x + i * cw) as GLfloat, y as GLfloat, cw as GLfloat, ch as GLfloat)
+                    self.fns.glUniform4f(self.text_u_uv, 0.0 as GLfloat, v0 as GLfloat, 1.0 as GLfloat, v1 as GLfloat)
+                    self.fns.glDrawArrays(gl_triangles(), 0 as GLint, 6 as GLsizei)
+                i = i + 1
+
+# Interface-field-assignment workaround (see toolkit/render/software_renderer.tr's
+# own comment on the underlying compiler gap: routing a concrete class value
+# through a function whose return type is the interface works; a plain field
+# assignment does not).
+pub def gl_renderer_of(g: GlCanvas) -> Renderer:
+    return g
+
+pub def gl_canvas_of(g: GlCanvas) -> Canvas:
+    return g

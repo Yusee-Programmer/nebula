@@ -50,3 +50,11 @@ extend Caps:
     # through Canvas's own interface.
     pub def sdl2() -> Caps:
         return Caps.init(true, true, true, false, false)
+
+    # GlCanvas (proposal-v6 phase 2): same shape as sdl2() -- real alpha
+    # blend, a draw_shadow, hardware-accelerated by construction (it IS the
+    # GPU path) -- still no read_back/subpixel_text exposed through Canvas's
+    # own interface (GL's blend unit reads the framebuffer internally, but
+    # that's never surfaced as a Tauraro-callable operation).
+    pub def gl() -> Caps:
+        return Caps.init(true, true, true, false, false)

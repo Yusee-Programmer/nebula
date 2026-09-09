@@ -1,6 +1,6 @@
 # Proposal v6 — a `Renderer` layer, then GPU desktop + native web backends
 
-**Status:** Phase 1 implemented and verified 2026-09-09. Phases 2/3 not started.
+**Status:** Phases 1 and 2 implemented and verified 2026-09-09. Phase 3 not started.
 In response to a direct request to (1) gamma-correct blend (done, see
 RASTERIZER.md's own status note) (2) GPU-accelerate every UI tier except
 UEFI/bare-metal (3) give the browser tier native Canvas2D quality. This
@@ -112,6 +112,109 @@ two phases additive instead of invasive) — worth landing and re-verifying on
 its own before building anything on top of it.
 
 ## 4. Phase 2 — `GLRenderer`, desktop only
+
+### Phase 2 status — shipped
+
+Landed as `toolkit/render/desktop/gl_bindings.tr` (OpenGL 3.3 core function
+pointers, all resolved at runtime via `SDL_GL_GetProcAddress` — this is what
+the `Pointer[void] as def(...)->...` compiler fix unblocked) and
+`toolkit/render/desktop/gl_canvas.tr`'s `GlCanvas`, ONE class implementing
+BOTH `Canvas` and `Renderer` rather than the separate `SdlCanvas`+
+`SoftwareRenderer` pair the software path uses. That collapse turned out to
+be the right shape, not just a shortcut: `Canvas.fill_rect` and
+`Renderer.rounded_rect` are the same GPU primitive (a quad, filled via a
+rounded-box signed-distance-field fragment shader, `radius = 0` degenerating
+exactly to a flat rect), so one shared shader/VAO/VBO serves every draw call
+in the toolkit. `circle`/`circle_ring` are that same primitive again, sized
+so the radius is maximal (a circle is a maximally-rounded square) — so the
+whole renderer is really one draw call shape (`rounded_rect`) plus a two-pass
+border variant (draw the border-colored shape, then a smaller inset
+fill-colored shape on top, replacing the software path's single-pass
+three-way `mix3_color_hq` math entirely, because REAL alpha blending can
+just composite pass 2 onto pass 1 the way a real vector renderer would) and a
+textured-quad variant for glyphs (the three baked atlases, uploaded once as
+GL_RED textures, sampled straight from the SAME 0-16 coverage bytes the CPU
+path bakes, just linearly rescaled to 0-255).
+
+Gamma correctness: `SDL_GL_FRAMEBUFFER_SRGB_CAPABLE` is requested at context
+creation and `GL_FRAMEBUFFER_SRGB` enabled after — every shape/text uniform
+color is converted sRGB→linear on the CPU (reusing `toolkit/render/gamma.tr`'s
+existing LUT, not a shader approximation) and the GPU handles linear↔sRGB
+around every blend automatically, i.e. the same principle
+`toolkit/ui/interp.tr`'s `mix_color_hq` hand-implements on the CPU, done by
+fixed-function hardware instead.
+
+Verified visually (screenshot, `examples/gl_smoke/main.tr` +
+`scripts/build-desktop-gl.ps1`): flat rect, rounded rect, bordered rounded
+box, filled circle, ring, a real alpha-blended translucent overlay (0xFFFFFF
+at alpha=90 over the dark background reads as a correctly-blended mid-gray,
+not opaque white), and text at two sizes, all correct in one frame.
+
+Two real bugs found closing the loop, worth recording:
+1. **`glUniform4f` on a `vec3` shader uniform silently no-ops** on this
+   driver (first screenshot: every shape rendered pure black — coverage/AA
+   were correct, only color was wrong, because the color uniform was never
+   actually written). No GL error, no Tauraro-side error — this is exactly
+   the "shader bugs show up as wrong colours with no useful diagnostic"
+   risk this section warned about before starting. Fixed by adding a real
+   `glUniform3f` binding and matching every vec3-uniform call site to it.
+2. Calling `Str.len(...)`/`Str.char_at(...)` **without importing `Str`** from
+   `string.str` doesn't fail where you'd expect — the compiler silently
+   treats the bare `Str` identifier as an ordinary (undeclared) value and
+   shifts it in as the call's first positional argument instead of reporting
+   "Str is not defined" at the `Str.len(...)` site. Cost real debugging time
+   before the missing import was spotted; every other file in this toolkit
+   that uses `Str` already imports it, so this had never surfaced before.
+
+Also required syncing the freshly-fixed compiler into
+`~/.taupkg/bin/tauraroc-windows-x64/tauraroc.exe` — nebula's build scripts
+call the taupkg SDK copy, not the tauraro repo's own `tauraroc.exe`, and the
+SDK copy still predated the `Pointer[void] as def(...)->...` fix.
+
+**Wired into the full widget demo**, `examples/widgets_demo_gl/main.tr` — a
+near-exact copy of `examples/widgets_demo/main.tr` with exactly two kinds of
+change: `gl_canvas_open(...)` instead of `SdlCanvas.open_vsync(...)` (every
+existing `Canvas`-typed call site keeps compiling unchanged, phase 1's whole
+point), and each host-painted widget's `.renderer` field reassigned from its
+default `SoftwareRenderer` to `gl_renderer_of(canvas)`. Two small additions
+made this a true drop-in: `GlCanvas.draw_shadow` (same six-layer
+concentric/fading approach `SdlCanvas.draw_shadow` uses, but each layer is a
+real antialiased rounded GPU draw instead of a flat square-cornered rect —
+free here where SDL's own version deliberately skipped rounding) and
+`Caps.gl()`/`gl_canvas.tr`'s own `caps()` (same per-backend-module pattern
+`sdl_canvas.tr` already follows). Screenshot-verified: header card + shadow,
+tabs, checkbox, 3-way radio group, switch, slider + progress bar, dropdown,
+scroll list, and the OK/CANCEL buttons all render correctly through the GPU
+path in one frame — the complete widget set, not just the isolated shapes
+`gl_smoke` exercises. The markup-driven chrome tree and `draw_text`/
+`paint_section_label` still call the CPU rasterizer's `Canvas.set_pixel`/
+`fill_rect` per pixel (correct output, still real GPU alpha-blended pixels,
+just not batched into one SDF draw call per shape) — fully batching those
+too means routing `toolkit.ui.interp`'s scene-graph execution itself through
+`Renderer`, a separate follow-up this session didn't need in order to prove
+the wiring.
+
+**A third real bug, found only once the full demo was running (not visible
+in `gl_smoke`'s single-frame-shaped test): the whole window flickered.**
+Root cause: `render_diff_to`'s skip-unchanged-commands optimization assumes
+each `present()` leaves the previous frame's pixels in place except for what
+just changed — true for `SdlCanvas` (SDL2's 2D renderer's present behaves
+like a copy/blit), **false for real OpenGL double buffering**, which
+`SDL_GL_SwapWindow` performs as an actual flip between two distinct physical
+buffers. Anything diffing skipped in one frame simply never got drawn into
+the OTHER buffer, so the window alternated between two different partial
+states every other frame — a flicker, not a one-time glitch. Fixed by
+switching the GL demo's chrome to `render_to` (unconditional full repaint,
+matching every widget below it, which already repaints its fixed rect
+unconditionally every frame for the same reason) and drawing the header
+shadow every frame instead of only on repaint transitions. Verified fixed
+via three screenshots ~200ms apart, pixel-identical. This is a real
+constraint for any future `Renderer` backend built on true double/multiple
+buffering (not just GL) — diffing-based partial repaint is only safe on a
+backend whose present() is copy-semantics, and needs to be an explicit,
+checked assumption rather than implicit going forward.
+
+---
 
 A new `toolkit/render/desktop/gl_renderer.tr`. Desktop specifically, because
 this needs a real GPU context SDL2's 2D renderer doesn't expose:

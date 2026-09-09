@@ -142,7 +142,7 @@ extend MenuBar:
                 return i
             lx = lx + lw
             i = i + 1
-        return 0 - 1
+        return -1
 
     pub def hover_at(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> void:
         self.hover_menu = 0 - 1

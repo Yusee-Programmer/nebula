@@ -1,0 +1,159 @@
+# toolkit.ui.scrollbar — a draggable, proportional-thumb vertical scrollbar.
+#
+# Host-owned, same rationale as every widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). Unlike toolkit.ui.list.ScrollList/
+# toolkit.ui.table.Table (which scroll themselves via mouse wheel with no
+# visible indicator), Scrollbar is a pure VISUAL + drag-input control: it
+# does not own any content, it mirrors and drives an external offset --
+# the same "widget owns its own value, caller syncs it against something
+# else" relationship toolkit.ui.progress.ProgressBar has with
+# toolkit.ui.slider.Slider.
+#
+#   mut sb = Scrollbar.init()
+#   ...
+#   sb.sync(table.scroll_offset, table.max_offset(tblh), table.visible_rows(tblh), len(table.rows))
+#   if clicked: sb.click_inside(mx, my, sbx, sby, sbw, sbh)
+#   if mdown: sb.drag_to(my, sby, sbh)
+#   table.scroll_offset = sb.offset
+#   ...
+#   sb.paint(canvas, sbx, sby, sbw, sbh)
+#
+# Units are whatever the caller's own max_offset/visible_rows already use
+# (Table/ScrollList count in ROWS, not pixels) -- Scrollbar never needs to
+# know which; it only ever computes ratios.
+
+from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
+
+pub class Scrollbar:
+    pub offset:      int   # current scroll position (caller's units)
+    pub max_offset:  int   # maximum scroll position (caller's units)
+    pub page_units:  int   # how many units are visible at once -- sizes the thumb
+    pub total_units: int   # total scrollable units -- sizes the thumb
+    pub dragging:    bool
+    pub drag_start_my:     int
+    pub drag_start_offset: int
+    pub track:        int
+    pub thumb:        int
+    pub thumb_active:  int
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
+    # default.
+    pub page_bg:      int
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:     Renderer
+
+extend Scrollbar:
+    pub def init() -> Scrollbar:
+        mut s = Scrollbar()
+        s.offset = 0
+        s.max_offset = 0
+        s.page_units = 1
+        s.total_units = 1
+        s.dragging = false
+        s.drag_start_my = 0
+        s.drag_start_offset = 0
+        s.track = 0xE2E8F0
+        s.thumb = 0xCBD5E1
+        s.thumb_active = 0x94A3B8
+        s.page_bg = 0xFFFFFF
+        s.renderer = default_renderer()
+        return s
+
+    # Pulls this frame's range from whatever it's mirroring (a Table/
+    # ScrollList's own scroll_offset/max_offset/visible_rows/len(rows)) --
+    # call once per frame, before click_inside/drag_to/paint, so the thumb's
+    # size and position always reflect the CURRENT content even if it was
+    # just wheel-scrolled or resized.
+    pub def sync(self, offset: int, max_offset: int, page_units: int, total_units: int) -> void:
+        self.max_offset = max_offset
+        self.page_units = page_units
+        self.total_units = total_units
+        mut o = offset
+        if o < 0:
+            o = 0
+        if o > self.max_offset:
+            o = self.max_offset
+        self.offset = o
+
+    def min_thumb_h(self) -> int:
+        return 24
+
+    # Proportional to how much of the total content is visible at once --
+    # the same ratio a real OS scrollbar uses, clamped to a minimum so a
+    # very long list still leaves something draggable.
+    def thumb_h(self, h: int) -> int:
+        if self.total_units <= 0 or self.page_units <= 0 or self.page_units >= self.total_units:
+            return h
+        mut th = h * self.page_units / self.total_units
+        if th < self.min_thumb_h():
+            th = self.min_thumb_h()
+        if th > h:
+            th = h
+        return th
+
+    def thumb_y(self, y: int, h: int) -> int:
+        mut th = self.thumb_h(h)
+        mut travel = h - th
+        if self.max_offset <= 0 or travel <= 0:
+            return y
+        return y + travel * self.offset / self.max_offset
+
+    # Thumb hit -> start a drag. Track hit (above/below the thumb) -> jump
+    # one page in that direction, the same "click the track" gesture every
+    # OS scrollbar supports -- unlike Slider (which deliberately left this
+    # out as a future addition), a scrollbar without it feels broken since
+    # the track is the majority of a long list's own scrollbar.
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        if mx < x or mx >= x + w or my < y or my >= y + h:
+            return false
+        mut th = self.thumb_h(h)
+        mut ty = self.thumb_y(y, h)
+        if my >= ty and my < ty + th:
+            self.dragging = true
+            self.drag_start_my = my
+            self.drag_start_offset = self.offset
+        elif self.max_offset > 0:
+            mut o = self.offset
+            if my < ty:
+                o = o - self.page_units
+            else:
+                o = o + self.page_units
+            if o < 0:
+                o = 0
+            if o > self.max_offset:
+                o = self.max_offset
+            self.offset = o
+        return true
+
+    pub def drag_to(self, my: int, y: int, h: int) -> void:
+        if not self.dragging:
+            return
+        mut th = self.thumb_h(h)
+        mut travel = h - th
+        if travel <= 0 or self.max_offset <= 0:
+            return
+        mut dy = my - self.drag_start_my
+        mut delta = dy * self.max_offset / travel
+        mut o = self.drag_start_offset + delta
+        if o < 0:
+            o = 0
+        if o > self.max_offset:
+            o = self.max_offset
+        self.offset = o
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        # Full self-clear first, same reason every widget in this file
+        # group needs it under a caller that no longer clears the whole
+        # canvas every frame (see toolkit.ui.slider.Slider's own comment).
+        c.fill_rect(x, y, w, h, self.page_bg)
+
+        self.renderer.rounded_rect(c, x, y, w, h, w / 2, self.track, self.page_bg)
+
+        mut th = self.thumb_h(h)
+        mut ty = self.thumb_y(y, h)
+        mut tcolor = self.thumb
+        if self.dragging:
+            tcolor = self.thumb_active
+        self.renderer.rounded_rect(c, x, ty, w, th, w / 2, tcolor, self.track)

@@ -1,6 +1,9 @@
 # Proposal v6 — a `Renderer` layer, then GPU desktop + native web backends
 
-**Status:** Phases 1 and 2 implemented and verified 2026-09-09. Phase 3 not started.
+**Status:** Phases 1 and 2 implemented and verified 2026-09-09, including a
+second full app (`desktop_shell_gl` + a new `Scrollbar` widget). Phase 3 is
+blocked on two real compiler gaps, found and reported, not yet fixed (see
+its own status section below).
 In response to a direct request to (1) gamma-correct blend (done, see
 RASTERIZER.md's own status note) (2) GPU-accelerate every UI tier except
 UEFI/bare-metal (3) give the browser tier native Canvas2D quality. This
@@ -214,6 +217,38 @@ buffering (not just GL) — diffing-based partial repaint is only safe on a
 backend whose present() is copy-semantics, and needs to be an explicit,
 checked assumption rather than implicit going forward.
 
+**Second full app, `examples/desktop_shell_gl/main.tr`** — desktop_shell
+(menu bar, `Router`-driven Dashboard/Data Table/Settings pages, Table,
+Slider, Checkbox/Radio/Switch, TextInput) GPU-accelerated end to end from
+the start, applying the `render_to`-not-`render_diff_to` lesson immediately
+rather than re-discovering it. Also added a genuinely new widget this pass:
+`toolkit/ui/scrollbar.tr`'s `Scrollbar` — a real draggable, proportional-
+thumb vertical scrollbar (click-thumb-to-drag, click-track-to-page, sized by
+content/viewport ratio the way a real OS scrollbar is), since neither
+`Table` nor `ScrollList` had ever had a VISIBLE scroll indicator, only silent
+mouse-wheel support. It's a pure mirror/drive control (owns its own
+`offset`, synced against `Table.scroll_offset` each frame the same way
+`ProgressBar` mirrors `Slider`), so it works with any content that already
+exposes `scroll_offset`/`max_offset`/`visible_rows`/`len(...)`, not just
+`Table`. Wired onto the Data Table page, right of the grid. Screenshot-
+verified: Dashboard opens correctly by default, Data Table (with the table
++ scrollbar both rendering) reachable and correct, no flicker (this file
+used `render_to` from the start, unlike `widgets_demo_gl` which found the
+bug the hard way first).
+
+**A testing-process gotcha, not a code bug:** repeated screenshot automation
+across several app launches left a stale OS cursor position/focus state that
+caused the FIRST post-fix launch to appear to open on the wrong page — root-
+caused by moving the mouse away before launch and re-testing clean, which
+fixed it immediately, and confirmed further by reproducing the identical
+symptom against the untouched original SdlCanvas-based `desktop_shell` too
+(so it was never GL-path-specific). Also confirmed mid-session: this box's
+screenshot/click automation needs `SetProcessDPIAware()` called in the
+*automation* process itself, or `GetClientRect`/`ClientToScreen`/click
+coordinates land in a scaled, wrong coordinate space against a real
+per-monitor-DPI-aware window (the same DPI mismatch class documented
+earlier for `gl_smoke`'s window-rect capture).
+
 ---
 
 A new `toolkit/render/desktop/gl_renderer.tr`. Desktop specifically, because
@@ -247,6 +282,55 @@ colours with no useful compiler diagnostic, unlike a Tauraro type error.
 This phase should be scoped as its own session, not squeezed in after phase 1.
 
 ## 5. Phase 3 — Canvas2D web backend, opt-in, browser-native quality
+
+### Phase 3 status — blocked on two real compiler gaps, not yet fixed
+
+Investigated 2026-09-09, before writing any nebula code, because Phase 2's
+own experience (the `Pointer[void] as def(...)->...` cast) showed it's worth
+confirming the compiler mechanism exists before building on top of it.
+Canvas2D needs Tauraro code to CALL a JS-provided function (`js_rounded_rect`
+etc.) — the OPPOSITE direction from `examples/web_demo`'s current wasm build,
+which imports NOTHING and only shares a raw pixel buffer JS reads directly.
+
+Tauraro does have the right *syntax* for this — `extern "C": def
+js_rounded_rect(...) -> void` with no body, documented in
+`docs/lang/17_extern_and_ffi.md` — but two separate gaps stand between that
+syntax and a working browser import today:
+
+1. **The LLVM backend rejects calling an extern function with no
+   definition at all** — `"unsupported expression: call js_rounded_rect()"`.
+   Since `docs/lang/22_compiling_and_cross_compilation.md` requires
+   `--backend llvm` for any wasm target, this alone blocks the approach
+   regardless of the second gap.
+2. **The wasm link path has no `--allow-undefined`/`-Wl,--import-undefined`
+   wiring** in `src/main.tr`'s wasm build command — wasm-ld's default is to
+   *error* on an unresolved function symbol rather than leave it as an
+   import, so even with gap 1 fixed, linking would fail rather than produce
+   an importable `.wasm`.
+
+Neither gap was fixed this session (this is a Tauraro compiler change, not
+a nebula one — the same category as the `Pointer[void] as def(...)->...`
+fix that unblocked phase 2, but this one needs LLVM-backend codegen work
+plus a linker-flag change, not a single codegen case). Also could not be
+empirically end-to-end verified even with those two fixed: this box has no
+bundled/system `zig` and the system `clang` (mingw64) lacks a wasm
+sysroot/wasi-libc, so `--target wasm-wasi`/`--target wasm` currently fail
+before reaching the link step regardless (a separate, pre-existing gap, not
+new to this investigation). A real `--allow-undefined`-style build would
+need either a working wasm sysroot on this box or a session where that's
+set up first.
+
+**What this means for Phase 3:** `Canvas2DRenderer` as designed (JS-import
+based, native `ctx.roundRect`/`ctx.arc`/`ctx.fillText`) is not buildable yet.
+`WebCanvas`'s existing raw-pixel-buffer approach still works unchanged and
+is not affected by any of this. Phase 3 is ON HOLD pending a decision: fix
+the two compiler gaps first (a real, scoped compiler task, likely smaller
+than phase 2's shader work but touching LLVM backend internals rather than
+one codegen case), set up a working wasm sysroot and re-verify, or defer
+Phase 3 indefinitely and treat `WebCanvas` as the web tier's permanent
+ceiling.
+
+---
 
 A new `toolkit/render/web/canvas2d_renderer.tr`, implementing the same
 `Renderer` interface via WASM imports into a handful of new JS functions

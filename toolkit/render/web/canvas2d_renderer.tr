@@ -1,0 +1,174 @@
+# toolkit.render.web.canvas2d_renderer — real browser Canvas2D quality
+# (proposal-v6 phase 3), via WASM host imports into a handful of JS
+# functions that call ctx.roundRect/ctx.arc/ctx.fillText directly --
+# browser-native antialiasing, hinting, and text shaping, instead of this
+# toolkit's own CPU rasterizer blitted as a raw pixel buffer
+# (toolkit.render.web.canvas.WebCanvas, which stays as-is: a second,
+# explicitly-opted-into backend, not a replacement -- see this file's own
+# proposal section for the tradeoff this is making on purpose).
+#
+# Depends on the `extern "C"` -> WASM-import mechanism verified end-to-end
+# this session (see docs/proposal/proposal-v6-renderer-abstraction.md's
+# Phase 3 status): a bare `extern "C": def js_foo(...) -> ...` with no
+# Tauraro-side body becomes a real WASM host import once linked with `zig
+# build-exe --import-symbols` (scripts/build-web.ps1) -- the host page
+# supplies matching JS functions under the `env` import module, discoverable
+# via `WebAssembly.Module.imports(module)`.
+#
+# ONE class implements BOTH Canvas and Renderer, same reasoning as
+# toolkit.render.desktop.gl_canvas.GlCanvas: every shape this toolkit draws
+# reduces to a handful of JS calls, and there is no separate "canvas
+# object"/"renderer object" split worth maintaining on this backend either.
+# `rounded_box`/`circle_ring` (bordered/ringed shapes) are two-pass, exactly
+# like GlCanvas's own SDF shapes: draw the outer shape in the border colour,
+# then a smaller inset shape in the fill colour on top -- real Canvas2D
+# alpha compositing does the rest, no three-way CPU blend math needed.
+#
+# All extern params are `c_int` (32-bit), not Tauraro's own `int` (i64) --
+# this is what lets every one of these arrive in JS as a plain Number, never
+# a BigInt (see render_web.tr's own header on the i64-vs-i32 wasm ABI split;
+# `Pointer[T]` already crosses as a plain i32 Number for the same reason).
+
+from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.caps import Caps
+from toolkit.text.font import Font
+from string.str import Str
+
+# Real alpha blending (the browser's own compositor) and hardware
+# compositing (every modern browser accelerates canvas 2D) -- see
+# toolkit/render/caps.tr's header for what each flag promises. No
+# draw_shadow helper yet (a real one is cheap to add later via
+# ctx.shadowBlur -- not attempted this pass), and no destination read-back
+# exposed through Canvas's own interface, same as every other backend.
+pub def caps() -> Caps:
+    return Caps.init(true, false, true, false, true)
+
+extern "C":
+    def js_set_canvas_size(w: c_int, h: c_int) -> void
+    def js_fill_rect(x: c_int, y: c_int, w: c_int, h: c_int, color: c_int, alpha: c_int) -> void
+    def js_rounded_rect(x: c_int, y: c_int, w: c_int, h: c_int, radius: c_int, color: c_int) -> void
+    def js_circle(cx: c_int, cy: c_int, r: c_int, color: c_int) -> void
+    def js_fill_text(ptr: Pointer[char], len: c_int, x: c_int, y: c_int, size_px: c_int, color: c_int) -> void
+
+pub class Canvas2DCanvas implements Canvas, Renderer:
+    pub w: int
+    pub h: int
+
+extend Canvas2DCanvas:
+    pub def init(w: int, h: int) -> Canvas2DCanvas:
+        mut c = Canvas2DCanvas()
+        c.w = w
+        c.h = h
+        unsafe:
+            js_set_canvas_size(w as c_int, h as c_int)
+        return c
+
+    pub def width(self) -> int:
+        return self.w
+
+    pub def height(self) -> int:
+        return self.h
+
+    # No back buffer to flip -- Canvas2D composites to the visible canvas
+    # live, so both of these exist only for call-site symmetry with every
+    # other backend's open()/clear()/present() shape.
+    pub def clear(self, color: int) -> void:
+        self.fill_rect(0, 0, self.w, self.h, color)
+
+    pub def present(self) -> void:
+        pass
+
+    # --- Canvas ----------------------------------------------------------
+
+    pub def fill_rect(self, x: int, y: int, w: int, h: int, color: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        unsafe:
+            js_fill_rect(x as c_int, y as c_int, w as c_int, h as c_int, color as c_int, 255 as c_int)
+
+    pub def fill_rect_alpha(self, x: int, y: int, w: int, h: int, color: int, alpha: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        unsafe:
+            js_fill_rect(x as c_int, y as c_int, w as c_int, h as c_int, color as c_int, alpha as c_int)
+
+    pub def set_pixel(self, x: int, y: int, color: int) -> void:
+        unsafe:
+            js_fill_rect(x as c_int, y as c_int, 1 as c_int, 1 as c_int, color as c_int, 255 as c_int)
+
+    # --- Renderer ----------------------------------------------------------
+
+    pub def rounded_rect(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, fg: int, bg: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        mut r = radius
+        if r < 0:
+            r = 0
+        if r * 2 > w:
+            r = w / 2
+        if r * 2 > h:
+            r = h / 2
+        unsafe:
+            js_rounded_rect(x as c_int, y as c_int, w as c_int, h as c_int, r as c_int, fg as c_int)
+
+    pub def rounded_box(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, border: int, ambient: int) -> void:
+        if w <= 0:
+            return
+        if h <= 0:
+            return
+        mut r = radius
+        if r < 0:
+            r = 0
+        if r * 2 > w:
+            r = w / 2
+        if r * 2 > h:
+            r = h / 2
+        mut b = border_w
+        if b < 0:
+            b = 0
+        if b == 0:
+            self.rounded_rect(c, x, y, w, h, r, fill, ambient)
+            return
+        if b * 2 >= w or b * 2 >= h:
+            self.rounded_rect(c, x, y, w, h, r, border, ambient)
+            return
+        self.rounded_rect(c, x, y, w, h, r, border, ambient)
+        mut ir = r - b
+        if ir < 0:
+            ir = 0
+        self.rounded_rect(c, x + b, y + b, w - b * 2, h - b * 2, ir, fill, border)
+
+    pub def circle(self, c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void:
+        if r <= 0:
+            return
+        unsafe:
+            js_circle(cx as c_int, cy as c_int, r as c_int, fg as c_int)
+
+    pub def circle_ring(self, c: Canvas, cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> void:
+        self.circle(c, cx, cy, r, ring, ambient)
+        mut ir = r - ring_w
+        if ir > 0:
+            self.circle(c, cx, cy, ir, fill, ring)
+
+    # `font` only supplies a pixel size here (font.cell_h()) -- the real
+    # glyph shapes, hinting, and shaping are the BROWSER's own font engine's
+    # job now, not the baked atlas every other backend samples. A real CSS
+    # font (see the host page's own js_fill_text) is what makes this
+    # backend's text look native instead of like a bitmap font blown up.
+    pub def text(self, c: Canvas, font: Font, s: str, x: int, y: int, fg: int, bg: int) -> void:
+        mut size_px = font.cell_h()
+        unsafe:
+            js_fill_text(s as Pointer[char], Str.len(s) as c_int, x as c_int, y as c_int, size_px as c_int, fg as c_int)
+
+pub def canvas2d_renderer_of(c: Canvas2DCanvas) -> Renderer:
+    return c
+
+pub def canvas2d_canvas_of(c: Canvas2DCanvas) -> Canvas:
+    return c

@@ -1,0 +1,35 @@
+# toolkit.render.renderer — the seam between "a widget wants to draw a
+# rounded rect/circle/glyph" and "here's how that actually gets rendered on
+# this platform" (proposal v6, phase 1).
+#
+# Every shape in this toolkit has always been computed by
+# toolkit.ui.interp's own CPU rasterizer, identically for every Canvas
+# backend -- there was never a point where a widget's PAINT call could be
+# intercepted and routed somewhere else (a GPU shader, a browser's own
+# Canvas2D), because widgets called toolkit.ui.interp's functions directly.
+# Renderer is that interception point, introduced with exactly one
+# implementation (SoftwareRenderer, toolkit/render/software_renderer.tr,
+# a thin wrapper around the SAME functions, zero behaviour change) so a
+# future GPU renderer (proposal-v6 phase 2) or browser-native Canvas2D
+# renderer (phase 3) can implement this same interface without every widget
+# needing to change again.
+#
+# Deliberately small and shaped exactly like the five drawing primitives
+# toolkit.ui.interp already has (paint_rounded_rect_aa/paint_rounded_box_aa/
+# fill_circle_aa/fill_circle_ring_aa/draw_text) -- this is a rename of the
+# call site, not a redesign of what gets drawn. Takes a Canvas explicitly,
+# same as those functions do today, since SoftwareRenderer still needs
+# somewhere to call set_pixel/fill_rect; a future GPU renderer may end up
+# ignoring it in favour of its own context, or this interface may grow a
+# variant that doesn't need one -- an open question phase 2 gets to answer
+# with a real GL backend in hand rather than guessed at here.
+
+from toolkit.render.canvas import Canvas
+from toolkit.text.font import Font
+
+pub interface Renderer:
+    def rounded_rect(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, fg: int, bg: int) -> void
+    def rounded_box(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, border_w: int, fill: int, border: int, ambient: int) -> void
+    def circle(self, c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void
+    def circle_ring(self, c: Canvas, cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> void
+    def text(self, c: Canvas, font: Font, s: str, x: int, y: int, fg: int, bg: int) -> void

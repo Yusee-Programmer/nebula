@@ -1,0 +1,254 @@
+# toolkit.ui.menubar — a horizontal top menu bar with per-label dropdowns.
+#
+# Host-owned, same rationale as every widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). Structurally a row of Dropdown-shaped
+# things sharing one bar: each top-level label (File/Edit/View/...) opens
+# ITS OWN item list below itself, at most one open at a time. Deliberately
+# reuses Dropdown's proven shape rather than inventing a new one:
+#   - paint() self-clears its own full (x, y, w, h) FIRST, every frame --
+#     the lesson from toolkit.ui.slider.Slider/toolkit.ui.tabs.Tabs (see
+#     either's header comment): a caller that no longer clears the whole
+#     canvas every frame (render_diff_to(), see examples/widgets_demo) needs
+#     every host-painted widget to own its full footprint, not rely on
+#     something else resetting it.
+#   - the open item list is redrawn as ONE full opaque panel every frame it
+#     is open (not just the changed row), the same reason Dropdown's own
+#     open-list redraw is already safe under diffing: hover changes are
+#     covered by the SAME full redraw, not a smaller one layered on top.
+#   - paint LAST, after every other widget for this frame, same ordering
+#     rule Dropdown's own header comment states and for the same reason
+#     (the open list must sit visually on top of whatever is already
+#     painted below it).
+#
+# Items are stored FLATTENED (all_items + item_offsets/item_counts), not as
+# `List[List[str]]` -- a real compiler gap found building this: a class
+# FIELD typed `List[List[str]]` compiles to `self->items->data[i]` typed as
+# `void*` in the generated C rather than the inner `TrList*`, so every
+# `.len`/index access on the inner list fails with "request for member
+# 'len' in something not a structure or union". Local variables of that
+# shape work elsewhere in this codebase; this is specific to a nested
+# generic List living in a class field. Worked around here rather than
+# fixed in the compiler this session -- out of scope for a UI-widget pass.
+#
+#   mut mb = MenuBar.init(
+#       ["File", "Edit", "View"],
+#       [3, 3, 3],
+#       ["New", "Open", "Exit", "Cut", "Copy", "Paste", "Dashboard", "Data", "Settings"],
+#   )
+#   ...
+#   if clicked:
+#       if mb.click_inside(mx, my, x, y, w, h):
+#           if mb.clicked_menu == 2:
+#               ... use mb.clicked_item to navigate ...
+#   mb.hover_at(mx, my, x, y, w, h)
+#   ...
+#   mb.paint(canvas, x, y, w, h)   # paint LAST
+
+from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
+from toolkit.text.font import Font
+from string.str import Str
+
+pub class MenuBar:
+    pub menus:         List[str]
+    pub item_counts:   List[int]   # items in menus[i] -- item_counts[i]
+    pub all_items:     List[str]   # every menu's items, concatenated in menu order
+    pub open_index:    int   # -1 = none open, else index into menus
+    pub hover_menu:    int   # -1 = none
+    pub hover_item:    int   # -1 = none; row within the OPEN menu's list
+    # Drained by the caller in the same click_inside() call that set them --
+    # see toolkit.ui.tabs.Tabs's own click_inside for why no separate
+    # "reset" step is needed: the caller only ever reads these the instant
+    # click_inside() just returned true, never across a frame boundary.
+    pub clicked_menu:  int
+    pub clicked_item:  int
+    pub bg:            int
+    pub fg:            int
+    pub fg_hover:      int
+    pub hover_bg:      int
+    pub list_bg:       int
+    pub border:        int
+    pub font:          Font
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason. The
+    # bar itself paints a full opaque background (see paint()) so page_bg
+    # only matters for the OPEN list's outer AA corners, which drop onto
+    # whatever sits below the bar, same as Dropdown's own list.
+    pub page_bg:       int
+    pub item_w:        int   # fixed width for every open dropdown's list
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:      Renderer
+
+extend MenuBar:
+    pub def init(menus: List[str], item_counts: List[int], all_items: List[str]) -> MenuBar:
+        mut m = MenuBar()
+        m.menus = menus
+        m.item_counts = item_counts
+        m.all_items = all_items
+        m.open_index = 0 - 1
+        m.hover_menu = 0 - 1
+        m.hover_item = 0 - 1
+        m.clicked_menu = 0 - 1
+        m.clicked_item = 0 - 1
+        m.bg = 0x111827
+        m.fg = 0xCBD5E1
+        m.fg_hover = 0xF8FAFC
+        m.hover_bg = 0x1F2937
+        m.list_bg = 0xFFFFFF
+        m.border = 0x334155
+        m.font = Font.load()
+        m.page_bg = 0x0B1120
+        m.item_w = 170
+        m.renderer = default_renderer()
+        return m
+
+    # Index into all_items where menus[idx]'s own items start.
+    def item_start(self, idx: int) -> int:
+        mut s = 0
+        mut i = 0
+        while i < idx:
+            s = s + self.item_counts[i]
+            i = i + 1
+        return s
+
+    def item_count(self, idx: int) -> int:
+        return self.item_counts[idx]
+
+    def item_text(self, menu_idx: int, row: int) -> str:
+        return self.all_items[self.item_start(menu_idx) + row]
+
+    def label_w(self, idx: int) -> int:
+        return Str.len(self.menus[idx]) * self.font.cell_w() + 28
+
+    # Shared by paint()/click_inside()/hover_at() so the three can never
+    # disagree about where a label actually is -- computed fresh each call
+    # rather than cached, since it is cheap (a handful of labels) and a
+    # cache would be one more thing to invalidate correctly.
+    def label_x(self, idx: int, base_x: int) -> int:
+        mut lx = base_x
+        mut i = 0
+        while i < idx:
+            lx = lx + self.label_w(i)
+            i = i + 1
+        return lx
+
+    def label_at(self, mx: int, base_x: int) -> int:
+        mut lx = base_x
+        mut i = 0
+        while i < len(self.menus):
+            mut lw = self.label_w(i)
+            if mx >= lx and mx < lx + lw:
+                return i
+            lx = lx + lw
+            i = i + 1
+        return -1
+
+    pub def hover_at(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> void:
+        self.hover_menu = 0 - 1
+        self.hover_item = 0 - 1
+        if my >= y and my < y + h:
+            self.hover_menu = self.label_at(mx, x)
+            return
+        if self.open_index < 0:
+            return
+        mut lx = self.label_x(self.open_index, x)
+        mut n = self.item_count(self.open_index)
+        mut list_y = y + h
+        if mx < lx or mx >= lx + self.item_w:
+            return
+        mut rel = my - list_y
+        if rel < 0:
+            return
+        mut row_h = self.font.cell_h() + 12
+        mut idx = rel / row_h
+        if idx >= n:
+            return
+        self.hover_item = idx
+
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        self.clicked_menu = 0 - 1
+        self.clicked_item = 0 - 1
+
+        if my >= y and my < y + h:
+            mut idx = self.label_at(mx, x)
+            if idx < 0:
+                if self.open_index >= 0:
+                    self.open_index = 0 - 1
+                    return true
+                return false
+            if self.open_index == idx:
+                self.open_index = 0 - 1
+            else:
+                self.open_index = idx
+            return true
+
+        if self.open_index < 0:
+            return false
+
+        mut om = self.open_index
+        mut lx = self.label_x(om, x)
+        mut n = self.item_count(om)
+        mut row_h = self.font.cell_h() + 12
+        mut list_y = y + h
+        mut list_h = row_h * n
+        if mx >= lx and mx < lx + self.item_w and my >= list_y and my < list_y + list_h:
+            mut row = (my - list_y) / row_h
+            if row >= 0 and row < n:
+                self.clicked_menu = om
+                self.clicked_item = row
+            self.open_index = 0 - 1
+            return true
+
+        self.open_index = 0 - 1
+        return true
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        # Full self-clear first -- see the file header comment for why this
+        # matters now that a caller can legitimately stop clearing the
+        # whole canvas every frame.
+        c.fill_rect(x, y, w, h, self.bg)
+
+        mut ch = self.font.cell_h()
+        mut lx = x
+        mut i = 0
+        while i < len(self.menus):
+            mut lw = self.label_w(i)
+            mut label_fg = self.fg
+            mut cell_bg = self.bg
+            if i == self.open_index or i == self.hover_menu:
+                c.fill_rect(lx, y, lw, h, self.hover_bg)
+                cell_bg = self.hover_bg
+                label_fg = self.fg_hover
+            self.renderer.text(c, self.font, self.menus[i], lx + 14, y + (h - ch) / 2, label_fg, cell_bg)
+            lx = lx + lw
+            i = i + 1
+
+        if self.open_index < 0:
+            return
+
+        mut om = self.open_index
+        mut olx = self.label_x(om, x)
+        mut n = self.item_count(om)
+        mut row_h = ch + 12
+        mut list_y = y + h
+        mut list_h = row_h * n
+
+        # One full opaque panel, redrawn whole every open frame -- see the
+        # file header comment: this is what makes hover-highlight changes
+        # safe under diffing without any extra bookkeeping here.
+        c.fill_rect(olx, list_y, self.item_w, list_h, self.list_bg)
+        c.fill_rect(olx, list_y, self.item_w, 1, self.border)
+        c.fill_rect(olx, list_y + list_h - 1, self.item_w, 1, self.border)
+        c.fill_rect(olx, list_y, 1, list_h, self.border)
+        c.fill_rect(olx + self.item_w - 1, list_y, 1, list_h, self.border)
+
+        mut row = 0
+        while row < n:
+            mut ry = list_y + row_h * row
+            mut row_bg = self.list_bg
+            if row == self.hover_item:
+                c.fill_rect(olx + 1, ry, self.item_w - 2, row_h, 0xEFF6FF)
+                row_bg = 0xEFF6FF
+            self.renderer.text(c, self.font, self.item_text(om, row), olx + 14, ry + (row_h - ch) / 2, 0x0F172A, row_bg)
+            row = row + 1

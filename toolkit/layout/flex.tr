@@ -19,6 +19,7 @@
 
 from toolkit.ui.ast import UiNode, read_node, max_depth
 from toolkit.ui.style import Style, StyleCache, dir_col, dir_grid
+from toolkit.ui.widget_tags import tag_checkbox, tag_switch, tag_radio, tag_slider, tag_progress
 from toolkit.ui.style import align_stretch, align_center, align_end, align_between
 from toolkit.ui.style import align_around, align_evenly
 from toolkit.ui.style import font_size_sm, font_size_lg
@@ -82,6 +83,19 @@ pub class LayoutBox:
     # but treat "" as "no identity" rather than a valid key, the same
     # "malformed input degrades safely" policy the rest of this file uses).
     pub node_key: str
+    # Markup-tag widgets (phase 1): parsed ONCE in build() from the SAME
+    # class string `style` was resolved from (toolkit.ui.style.StyleCache.
+    # resolve_widget(), cached the same way `resolve()` already caches
+    # `Style`) -- see toolkit/ui/widget_tags.tr's own header for why this is
+    # a second, independent parse rather than fields on `Style`. Meaningless
+    # (left at their defaults) on any box whose `tag` isn't one of the five
+    # widget tags; `emit()`'s per-tag branches are the only readers.
+    pub w_checked:  bool
+    pub w_selected: bool
+    pub w_group:    str
+    pub w_min:      int
+    pub w_max:      int
+    pub w_value:    int
 
 extend LayoutBox:
     pub def init(kind: int, tag: str, text: str, event_name: str, handler: str, style: Style) -> LayoutBox:
@@ -98,6 +112,12 @@ extend LayoutBox:
         b.h = 0
         b.children = []
         b.node_key = ""
+        b.w_checked = false
+        b.w_selected = false
+        b.w_group = ""
+        b.w_min = 0
+        b.w_max = 100
+        b.w_value = 0
         return b
 
     pub def contains(self, px: int, py: int) -> bool:
@@ -139,6 +159,21 @@ pub def build(node: Pointer[UiNode], cache: StyleCache, depth: int, path: str) -
                 box.node_key = "K:" + st.key
             else:
                 box.node_key = path
+            # Markup-tag widgets (phase 1): parse widget-config tokens from
+            # the SAME class string, cached independently of `st` -- see
+            # WidgetTokens' own header. Every element pays this (a cache
+            # lookup, same cost `cache.resolve(cls)` above already pays),
+            # not just the five widget tags, since `build()` has no cheap
+            # way to know a tag is one of the five before parsing anyway --
+            # harmless for an ordinary `<panel>`/`<button>`, whose class
+            # string yields an all-defaults WidgetTokens nothing ever reads.
+            mut wt = cache.resolve_widget(cls)
+            box.w_checked = wt.checked
+            box.w_selected = wt.selected
+            box.w_group = wt.group
+            box.w_min = wt.min
+            box.w_max = wt.max
+            box.w_value = wt.value
             if depth < max_depth():
                 mut i = 0
                 while i < len(kids):
@@ -186,6 +221,38 @@ def main_gap(box: LayoutBox) -> int:
         return box.style.gap_y
     return box.style.gap_x
 
+# Intrinsic default size for a markup-tag widget with no explicit w-/h-
+# override -- same override rule kind_text() uses just below (an explicit
+# style still wins), so `<checkbox "w-8 h-8"/>` sizes up exactly like every
+# other markup element already lets an author override intrinsic sizing.
+# checkbox/radio/switch are small fixed-size controls almost always used at
+# one natural size, so BOTH dimensions default; slider/progress default only
+# their HEIGHT (a sensible row height even with no h- token) and leave WIDTH
+# at 0, same as a plain `<panel>` with no w- token -- an author sizes a
+# slider's width the same way they'd size anything else (`grow`, `w-full`,
+# `w-[300px]`), not via hidden widget-specific magic.
+def widget_intrinsic_w(tag: str) -> int:
+    if tag == tag_checkbox(): return 20
+    if tag == tag_radio(): return 18
+    if tag == tag_switch(): return 48
+    return 0
+
+def widget_intrinsic_h(tag: str) -> int:
+    if tag == tag_checkbox(): return 20
+    if tag == tag_radio(): return 18
+    if tag == tag_switch(): return 26
+    if tag == tag_slider(): return 24
+    if tag == tag_progress(): return 10
+    return 0
+
+def is_measured_widget_tag(tag: str) -> bool:
+    if tag == tag_checkbox(): return true
+    if tag == tag_radio(): return true
+    if tag == tag_switch(): return true
+    if tag == tag_slider(): return true
+    if tag == tag_progress(): return true
+    return false
+
 pub def measure(box: LayoutBox) -> void:
     if box.kind == kind_text():
         mut tw = Str.len(box.text) * glyph_w(box.style.font_size)
@@ -196,6 +263,17 @@ pub def measure(box: LayoutBox) -> void:
             th = box.style.h
         box.w = tw
         box.h = th
+        return
+
+    if is_measured_widget_tag(box.tag):
+        mut ww = widget_intrinsic_w(box.tag)
+        mut wh = widget_intrinsic_h(box.tag)
+        if box.style.w >= 0:
+            ww = box.style.w
+        if box.style.h >= 0:
+            wh = box.style.h
+        box.w = ww
+        box.h = wh
         return
 
     mut i = 0

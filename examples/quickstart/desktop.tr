@@ -43,7 +43,7 @@ def main():
     register_handler(it, "on_save", Say.init("SAVE"))
     register_handler(it, "on_cancel", Say.init("CANCEL"))
 
-    mut canvas = SdlCanvas.open("Nebula Quickstart", 360, 280)
+    mut canvas = SdlCanvas.open("Nebula Quickstart", 500, 500)
     if not canvas.ok():
         print("SDL window failed to open")
         return

@@ -10,7 +10,8 @@
 #   notifications.paint(canvas, fx, fy, 44, 24)
 
 from toolkit.render.canvas import Canvas
-from toolkit.ui.interp import paint_rounded_rect_aa, fill_circle_aa
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 
 pub class Switch:
     pub on:       bool
@@ -20,6 +21,8 @@ pub class Switch:
     pub knob:      int
     # See Checkbox.page_bg's comment -- same reason, same default.
     pub page_bg:   int
+    # See Checkbox.renderer's comment -- same reason, same default.
+    pub renderer:  Renderer
 
 extend Switch:
     pub def init(on: bool) -> Switch:
@@ -33,6 +36,7 @@ extend Switch:
         s.track_on = 0x3B82F6
         s.knob = 0xFFFFFF
         s.page_bg = 0x0B1120
+        s.renderer = default_renderer()
         return s
 
     pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
@@ -64,10 +68,10 @@ extend Switch:
         mut track = self.track_off
         if self.on:
             track = self.track_on
-        paint_rounded_rect_aa(c, x, y, w, h, h / 2, track, self.page_bg)
+        self.renderer.rounded_rect(c, x, y, w, h, h / 2, track, self.page_bg)
 
         mut r = h / 2 - 2
         mut travel = w - h
         mut knob_x = x + h / 2 + travel * self.knob_pos / 100
         mut knob_y = y + h / 2
-        fill_circle_aa(c, knob_x, knob_y, r, self.knob, track)
+        self.renderer.circle(c, knob_x, knob_y, r, self.knob, track)

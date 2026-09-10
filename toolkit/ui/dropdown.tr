@@ -15,8 +15,9 @@
 #   size.paint(canvas, fx, fy, fw, fh)   # paint LAST -- the open list overlays
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 from toolkit.text.font import Font
-from toolkit.ui.interp import paint_rounded_box_aa, draw_text
 
 pub class Dropdown:
     pub items:         List[str]
@@ -34,6 +35,9 @@ pub class Dropdown:
     # straight down from the box onto whatever's below it, not onto the box
     # itself).
     pub page_bg:       int
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:      Renderer
 
 extend Dropdown:
     pub def init(items: List[str], selected_index: int) -> Dropdown:
@@ -48,6 +52,7 @@ extend Dropdown:
         d.hover_bg = 0xE2E8F0
         d.font = Font.load()
         d.page_bg = 0x0B1120
+        d.renderer = default_renderer()
         return d
 
     pub def selected_text(self) -> str:
@@ -109,11 +114,11 @@ extend Dropdown:
         mut border_color = self.border
         if self.open:
             border_color = 0x3B82F6
-        paint_rounded_box_aa(c, x, y, w, h, 6, 2, self.bg, border_color, self.page_bg)
+        self.renderer.rounded_box(c, x, y, w, h, 6, 2, self.bg, border_color, self.page_bg)
 
         mut cw = self.font.cell_w()
         mut ch = self.font.cell_h()
-        draw_text(c, self.font, self.selected_text(), x + 10, y + (h - ch) / 2, self.fg, self.bg)
+        self.renderer.text(c, self.font, self.selected_text(), x + 10, y + (h - ch) / 2, self.fg, self.bg)
 
         # Chevron: three narrowing centered rects, pointing down when closed,
         # up when open -- the same "cheap glyph via a few fill_rects" spirit
@@ -141,7 +146,7 @@ extend Dropdown:
         # Interpreter.paint uses -- Canvas has no stroke-only rect primitive
         # (deliberately, see canvas.tr), so the ring is resolved per-subsample
         # inside paint_rounded_box_aa rather than as two overlapping fills.
-        paint_rounded_box_aa(c, x, list_y, w, list_h, 6, 1, self.bg, border_color, self.page_bg)
+        self.renderer.rounded_box(c, x, list_y, w, list_h, 6, 1, self.bg, border_color, self.page_bg)
 
         mut row = 0
         while row < n:
@@ -157,5 +162,5 @@ extend Dropdown:
                 row_bg = self.hover_bg
             if row == self.selected_index:
                 c.fill_rect(x + 1, ry, 3, h, 0x3B82F6)
-            draw_text(c, self.font, self.items[row], x + 10, ry + (h - ch) / 2, self.fg, row_bg)
+            self.renderer.text(c, self.font, self.items[row], x + 10, ry + (h - ch) / 2, self.fg, row_bg)
             row = row + 1

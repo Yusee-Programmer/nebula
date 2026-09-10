@@ -13,7 +13,8 @@
 #   download.paint(canvas, fx, fy, 300, 12)
 
 from toolkit.render.canvas import Canvas
-from toolkit.ui.interp import paint_rounded_rect_aa
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 
 pub class ProgressBar:
     pub value: int   # 0..100, clamped by set_value
@@ -22,6 +23,9 @@ pub class ProgressBar:
     # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
     # default.
     pub page_bg: int
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer: Renderer
 
 extend ProgressBar:
     pub def init(value: int) -> ProgressBar:
@@ -30,6 +34,7 @@ extend ProgressBar:
         p.fill = 0x22C55E
         p.value = 0
         p.page_bg = 0x0B1120
+        p.renderer = default_renderer()
         p.set_value(value)
         return p
 
@@ -43,7 +48,7 @@ extend ProgressBar:
 
     pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
         mut r = h / 2
-        paint_rounded_rect_aa(c, x, y, w, h, r, self.track, self.page_bg)
+        self.renderer.rounded_rect(c, x, y, w, h, r, self.track, self.page_bg)
 
         mut fw = w * self.value / 100
         # Below one diameter wide, a rounded rect clamps its own radius to
@@ -51,4 +56,4 @@ extend ProgressBar:
         # something wider than tall, so this doesn't need its own special
         # case for a near-empty bar -- it just becomes a small circle-ish cap.
         if fw > 0:
-            paint_rounded_rect_aa(c, x, y, fw, h, r, self.fill, self.track)
+            self.renderer.rounded_rect(c, x, y, fw, h, r, self.fill, self.track)

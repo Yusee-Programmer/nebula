@@ -22,8 +22,9 @@
 # examples/uefi_demo/render_interactive.tr's click-counter/key-flash squares.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 from toolkit.text.font import Font
-from toolkit.ui.interp import paint_rounded_box_aa, draw_text
 from string.str import Str
 
 pub class TextInput:
@@ -40,6 +41,9 @@ pub class TextInput:
     # default: needed to anti-alias this field's own outer corners against
     # whatever flat color is actually behind it.
     pub page_bg:   int
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:  Renderer
 
 extend TextInput:
     pub def init(max_len: int) -> TextInput:
@@ -54,6 +58,7 @@ extend TextInput:
         t.border = 0x64748B
         t.font = Font.load()
         t.page_bg = 0x0B1120
+        t.renderer = default_renderer()
         return t
 
     # Backspace (8) deletes the last character. Enter (13, 10 for a bare '\n')
@@ -104,7 +109,7 @@ extend TextInput:
         mut border_color = self.border
         if self.focused:
             border_color = 0x3B82F6
-        paint_rounded_box_aa(c, x, y, w, h, 6, 2, self.bg, border_color, self.page_bg)
+        self.renderer.rounded_box(c, x, y, w, h, 6, 2, self.bg, border_color, self.page_bg)
 
         mut cw = self.font.cell_w()
         mut ch = self.font.cell_h()
@@ -112,7 +117,7 @@ extend TextInput:
         mut tx = x + 8
         mut ty = y + (h - ch) / 2
 
-        draw_text(c, self.font, self.text, tx, ty, self.fg, self.bg)
+        self.renderer.text(c, self.font, self.text, tx, ty, self.fg, self.bg)
 
         if self.focused and self.cursor_on:
             mut cx = tx + n * cw

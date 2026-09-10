@@ -1,0 +1,41 @@
+# Minimal isolation test: does assigning a fresh Interpreter to a
+# module-level global (freestanding wasm) hang, independent of any markup
+# parsing? Deleted after use.
+
+from toolkit.ui.interp import Interpreter
+from toolkit.platform.arena import arena_init, arena_alloc, arena_realloc, arena_calloc
+
+pub export def nebula_heap_init(base: Pointer[u8], size: usize) -> void:
+    arena_init(base, size)
+
+@allocator
+def nebula_alloc(n: usize) -> Pointer[u8]:
+    return arena_alloc(n)
+
+@free
+def nebula_free(p: Pointer[u8]):
+    pass
+
+@realloc
+def nebula_realloc(p: Pointer[u8], n: usize) -> Pointer[u8]:
+    return arena_realloc(p, n)
+
+@calloc
+def nebula_calloc(n: usize, sz: usize) -> Pointer[u8]:
+    return arena_calloc(n, sz)
+
+mut _step: int = 0
+mut _it: Interpreter = Interpreter.init()
+
+pub export def nebula_step() -> int:
+    return _step
+
+pub export def nebula_init(width: int, height: int) -> void:
+    _step = 1
+    _it = Interpreter.init()
+    _step = 2
+    _it.root_bg = 0x0B1120
+    _step = 3
+
+pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int, buttons: int, key: int, wheel_delta: int) -> void:
+    _step = 100

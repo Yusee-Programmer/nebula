@@ -1,0 +1,156 @@
+# toolkit.render.desktop.gl_bindings — OpenGL 3.3 core-profile function
+# pointers, loaded at runtime via SDL_GL_GetProcAddress (proposal-v6 phase 2).
+#
+# Unlike sdl_bindings.tr (a statically-linked import library, resolved by the
+# linker at build time), OpenGL functions beyond 1.1 are NOT in Windows'
+# opengl32.lib -- it only ever exposes OpenGL 1.1, the version shipped in
+# 1997. Every function used here (shaders, VBOs, VAOs -- anything core
+# profile) has to be resolved at runtime through SDL_GL_GetProcAddress,
+# which wraps wglGetProcAddress (falling back to a static lookup for the
+# handful of 1.1 functions wglGetProcAddress itself can't resolve, per SDL's
+# own implementation) -- so loading everything this way, including the old
+# 1.1 entry points like glViewport/glClear, needs no separate opengl32.lib
+# link at all.
+#
+# This is exactly what tauraro's `Pointer[void] as def(...)->...` cast (fixed
+# in the compiler 2026-09-09) exists for: SDL_GL_GetProcAddress returns a raw
+# Pointer[void], and every field below is that pointer cast directly to the
+# real C function signature, with no closure/env involved (a bare native
+# function pointer always constructs with env = NULL).
+
+from toolkit.render.desktop.sdl_bindings import SDL_GL_GetProcAddress
+
+# --- GL scalar type aliases (match the real C ABI, not tauraro's own int/float) ---
+type GLenum = c_uint
+type GLboolean = c_uchar
+type GLbitfield = c_uint
+type GLint = c_int
+type GLsizei = c_int
+type GLuint = c_uint
+type GLfloat = c_float
+# Plain `char` (not c_char) -- matches how every string cast in this codebase
+# already reads (`"..." as Pointer[char]`), so a GLchar* parameter accepts
+# that cast directly with no extra Pointer[c_char] retyping at each call site.
+type GLchar = char
+
+# --- Constants (GL 3.3 core subset actually used by gl_canvas.tr) ---
+pub def gl_color_buffer_bit() -> GLbitfield: return 0x00004000 as GLbitfield
+pub def gl_triangles() -> GLenum: return 0x0004 as GLenum
+pub def gl_float() -> GLenum: return 0x1406 as GLenum
+pub def gl_false() -> GLboolean: return 0 as GLboolean
+pub def gl_true() -> GLboolean: return 1 as GLboolean
+pub def gl_array_buffer() -> GLenum: return 0x8892 as GLenum
+pub def gl_static_draw() -> GLenum: return 0x88E4 as GLenum
+pub def gl_vertex_shader() -> GLenum: return 0x8B31 as GLenum
+pub def gl_fragment_shader() -> GLenum: return 0x8B30 as GLenum
+pub def gl_compile_status() -> GLenum: return 0x8B81 as GLenum
+pub def gl_link_status() -> GLenum: return 0x8B82 as GLenum
+pub def gl_blend() -> GLenum: return 0x0BE2 as GLenum
+pub def gl_src_alpha() -> GLenum: return 0x0302 as GLenum
+pub def gl_one_minus_src_alpha() -> GLenum: return 0x0303 as GLenum
+pub def gl_texture_2d() -> GLenum: return 0x0DE1 as GLenum
+pub def gl_red() -> GLenum: return 0x1903 as GLenum
+pub def gl_unsigned_byte() -> GLenum: return 0x1401 as GLenum
+pub def gl_texture_min_filter() -> GLenum: return 0x2801 as GLenum
+pub def gl_texture_mag_filter() -> GLenum: return 0x2800 as GLenum
+pub def gl_linear() -> GLenum: return 0x2601 as GLenum
+pub def gl_texture_wrap_s() -> GLenum: return 0x2802 as GLenum
+pub def gl_texture_wrap_t() -> GLenum: return 0x2803 as GLenum
+pub def gl_clamp_to_edge() -> GLenum: return 0x812F as GLenum
+pub def gl_texture0() -> GLenum: return 0x84C0 as GLenum
+pub def gl_framebuffer_srgb() -> GLenum: return 0x8DB9 as GLenum
+pub def gl_unpack_alignment() -> GLenum: return 0x0CF5 as GLenum
+
+pub class GlFns:
+    pub glViewport:            def(GLint, GLint, GLsizei, GLsizei) -> void
+    pub glClearColor:          def(GLfloat, GLfloat, GLfloat, GLfloat) -> void
+    pub glClear:                def(GLbitfield) -> void
+    pub glEnable:                def(GLenum) -> void
+    pub glDisable:              def(GLenum) -> void
+    pub glBlendFunc:            def(GLenum, GLenum) -> void
+    pub glGenBuffers:            def(GLsizei, Pointer[GLuint]) -> void
+    pub glBindBuffer:            def(GLenum, GLuint) -> void
+    pub glBufferData:            def(GLenum, usize, Pointer[void], GLenum) -> void
+    pub glGenVertexArrays:      def(GLsizei, Pointer[GLuint]) -> void
+    pub glBindVertexArray:      def(GLuint) -> void
+    pub glVertexAttribPointer:  def(GLuint, GLint, GLenum, GLboolean, GLsizei, Pointer[void]) -> void
+    pub glEnableVertexAttribArray: def(GLuint) -> void
+    pub glCreateShader:          def(GLenum) -> GLuint
+    pub glShaderSource:          def(GLuint, GLsizei, Pointer[Pointer[GLchar]], Pointer[GLint]) -> void
+    pub glCompileShader:        def(GLuint) -> void
+    pub glGetShaderiv:          def(GLuint, GLenum, Pointer[GLint]) -> void
+    pub glGetShaderInfoLog:      def(GLuint, GLsizei, Pointer[GLsizei], Pointer[GLchar]) -> void
+    pub glDeleteShader:          def(GLuint) -> void
+    pub glCreateProgram:        def() -> GLuint
+    pub glAttachShader:          def(GLuint, GLuint) -> void
+    pub glLinkProgram:            def(GLuint) -> void
+    pub glGetProgramiv:          def(GLuint, GLenum, Pointer[GLint]) -> void
+    pub glGetProgramInfoLog:    def(GLuint, GLsizei, Pointer[GLsizei], Pointer[GLchar]) -> void
+    pub glUseProgram:            def(GLuint) -> void
+    pub glGetUniformLocation:    def(GLuint, Pointer[GLchar]) -> GLint
+    pub glUniform1i:              def(GLint, GLint) -> void
+    pub glUniform1f:              def(GLint, GLfloat) -> void
+    pub glUniform2f:              def(GLint, GLfloat, GLfloat) -> void
+    pub glUniform3f:              def(GLint, GLfloat, GLfloat, GLfloat) -> void
+    pub glUniform4f:              def(GLint, GLfloat, GLfloat, GLfloat, GLfloat) -> void
+    pub glDrawArrays:            def(GLenum, GLint, GLsizei) -> void
+    pub glGenTextures:            def(GLsizei, Pointer[GLuint]) -> void
+    pub glBindTexture:            def(GLenum, GLuint) -> void
+    pub glTexImage2D:            def(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, Pointer[void]) -> void
+    pub glTexParameteri:        def(GLenum, GLenum, GLint) -> void
+    pub glActiveTexture:        def(GLenum) -> void
+    pub glPixelStorei:            def(GLenum, GLint) -> void
+    pub glGetError:              def() -> GLenum
+
+# Resolves one GL entry point by name -- Pointer[void] as def(...)->... is
+# the exact compiler feature this whole file exists to exercise; a NULL
+# result (extension truly unavailable) is not specially handled here since
+# every function loaded is core GL 3.3, always present once a 3.3 context is
+# current.
+def gl_addr(name: str) -> Pointer[void]:
+    unsafe:
+        return SDL_GL_GetProcAddress(name as Pointer[char])
+
+pub def load_gl_fns() -> GlFns:
+    mut f = GlFns()
+    unsafe:
+        f.glViewport = gl_addr("glViewport") as def(GLint, GLint, GLsizei, GLsizei) -> void
+        f.glClearColor = gl_addr("glClearColor") as def(GLfloat, GLfloat, GLfloat, GLfloat) -> void
+        f.glClear = gl_addr("glClear") as def(GLbitfield) -> void
+        f.glEnable = gl_addr("glEnable") as def(GLenum) -> void
+        f.glDisable = gl_addr("glDisable") as def(GLenum) -> void
+        f.glBlendFunc = gl_addr("glBlendFunc") as def(GLenum, GLenum) -> void
+        f.glGenBuffers = gl_addr("glGenBuffers") as def(GLsizei, Pointer[GLuint]) -> void
+        f.glBindBuffer = gl_addr("glBindBuffer") as def(GLenum, GLuint) -> void
+        f.glBufferData = gl_addr("glBufferData") as def(GLenum, usize, Pointer[void], GLenum) -> void
+        f.glGenVertexArrays = gl_addr("glGenVertexArrays") as def(GLsizei, Pointer[GLuint]) -> void
+        f.glBindVertexArray = gl_addr("glBindVertexArray") as def(GLuint) -> void
+        f.glVertexAttribPointer = gl_addr("glVertexAttribPointer") as def(GLuint, GLint, GLenum, GLboolean, GLsizei, Pointer[void]) -> void
+        f.glEnableVertexAttribArray = gl_addr("glEnableVertexAttribArray") as def(GLuint) -> void
+        f.glCreateShader = gl_addr("glCreateShader") as def(GLenum) -> GLuint
+        f.glShaderSource = gl_addr("glShaderSource") as def(GLuint, GLsizei, Pointer[Pointer[GLchar]], Pointer[GLint]) -> void
+        f.glCompileShader = gl_addr("glCompileShader") as def(GLuint) -> void
+        f.glGetShaderiv = gl_addr("glGetShaderiv") as def(GLuint, GLenum, Pointer[GLint]) -> void
+        f.glGetShaderInfoLog = gl_addr("glGetShaderInfoLog") as def(GLuint, GLsizei, Pointer[GLsizei], Pointer[GLchar]) -> void
+        f.glDeleteShader = gl_addr("glDeleteShader") as def(GLuint) -> void
+        f.glCreateProgram = gl_addr("glCreateProgram") as def() -> GLuint
+        f.glAttachShader = gl_addr("glAttachShader") as def(GLuint, GLuint) -> void
+        f.glLinkProgram = gl_addr("glLinkProgram") as def(GLuint) -> void
+        f.glGetProgramiv = gl_addr("glGetProgramiv") as def(GLuint, GLenum, Pointer[GLint]) -> void
+        f.glGetProgramInfoLog = gl_addr("glGetProgramInfoLog") as def(GLuint, GLsizei, Pointer[GLsizei], Pointer[GLchar]) -> void
+        f.glUseProgram = gl_addr("glUseProgram") as def(GLuint) -> void
+        f.glGetUniformLocation = gl_addr("glGetUniformLocation") as def(GLuint, Pointer[GLchar]) -> GLint
+        f.glUniform1i = gl_addr("glUniform1i") as def(GLint, GLint) -> void
+        f.glUniform1f = gl_addr("glUniform1f") as def(GLint, GLfloat) -> void
+        f.glUniform2f = gl_addr("glUniform2f") as def(GLint, GLfloat, GLfloat) -> void
+        f.glUniform3f = gl_addr("glUniform3f") as def(GLint, GLfloat, GLfloat, GLfloat) -> void
+        f.glUniform4f = gl_addr("glUniform4f") as def(GLint, GLfloat, GLfloat, GLfloat, GLfloat) -> void
+        f.glDrawArrays = gl_addr("glDrawArrays") as def(GLenum, GLint, GLsizei) -> void
+        f.glGenTextures = gl_addr("glGenTextures") as def(GLsizei, Pointer[GLuint]) -> void
+        f.glBindTexture = gl_addr("glBindTexture") as def(GLenum, GLuint) -> void
+        f.glTexImage2D = gl_addr("glTexImage2D") as def(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, Pointer[void]) -> void
+        f.glTexParameteri = gl_addr("glTexParameteri") as def(GLenum, GLenum, GLint) -> void
+        f.glActiveTexture = gl_addr("glActiveTexture") as def(GLenum) -> void
+        f.glPixelStorei = gl_addr("glPixelStorei") as def(GLenum, GLint) -> void
+        f.glGetError = gl_addr("glGetError") as def() -> GLenum
+    return f

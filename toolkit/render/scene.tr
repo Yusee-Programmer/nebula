@@ -57,6 +57,20 @@ pub def cmd_clip_push() -> int:
 pub def cmd_clip_pop() -> int:
     return 4
 
+# Markup-tag widgets (checkbox/switch/radio/slider dots and thumbs) are
+# circles, which nothing in this file could express before -- every existing
+# shape command is a rounded rect at radius<=w/2. Reuses the SAME Cmd fields
+# rounded_rect/rounded_box already have (x/y as the CENTER instead of a
+# top-left corner, radius as the circle's radius, border_w as the ring's
+# width) rather than growing Cmd with circle-only fields -- cmd_eq/
+# scenes_diffable stay untouched, since they already compare every field
+# generically regardless of what a given kind means by each one.
+pub def cmd_circle() -> int:
+    return 5
+
+pub def cmd_circle_ring() -> int:
+    return 6
+
 pub class Cmd:
     pub kind:     int
     pub x:        int
@@ -126,6 +140,47 @@ extend Cmd:
         c.border_w = border_w
         c.fill = fill
         c.stroke = stroke
+        c.ambient = ambient
+        c.text = ""
+        c.alpha = 255
+        c.font_size = 1
+        return c
+
+    # `x`/`y` are the circle's CENTER here, not a top-left corner -- the
+    # only Cmd kind where that's true, since every other shape is rect-based.
+    pub def circle(cx: int, cy: int, r: int, fill: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_circle()
+        c.x = cx
+        c.y = cy
+        c.w = 0
+        c.h = 0
+        c.radius = r
+        c.border_w = 0
+        c.fill = fill
+        c.stroke = 0
+        c.ambient = ambient
+        c.text = ""
+        c.alpha = 255
+        c.font_size = 1
+        return c
+
+    # An annulus: `fill` inside the inner radius (r - ring_w), `stroke` in
+    # the ring itself, `ambient` outside -- same three-colour shape
+    # `rounded_box`'s border already has, just circular. `border_w` here
+    # means "ring width", exactly like it means "border width" on
+    # `rounded_box`.
+    pub def circle_ring(cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_circle_ring()
+        c.x = cx
+        c.y = cy
+        c.w = 0
+        c.h = 0
+        c.radius = r
+        c.border_w = ring_w
+        c.fill = fill
+        c.stroke = ring
         c.ambient = ambient
         c.text = ""
         c.alpha = 255

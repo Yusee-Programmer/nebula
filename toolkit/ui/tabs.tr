@@ -20,8 +20,9 @@
 #                                                          # live-reload.
 
 from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 from toolkit.text.font import Font
-from toolkit.ui.interp import draw_text
 from string.str import Str
 
 pub class Tabs:
@@ -31,10 +32,15 @@ pub class Tabs:
     pub fg_selected:    int
     pub underline:      int
     pub font:           Font
-    # See toolkit.ui.checkbox.Checkbox.page_bg's comment -- same reason, same
-    # default. A tab strip paints no background of its own, so its labels sit
-    # directly on whatever the page behind it is.
+    # See toolkit.ui.checkbox.Checkbox.page_bg's comment for the AA-backdrop
+    # rationale -- but paint() ALSO uses this to clear its own (x, y, w, h)
+    # every frame (see paint()'s comment): switching the selected tab moves
+    # the underline bar and re-colors a label, and nothing else erases the
+    # PREVIOUS tab's underline/brighter label otherwise.
     pub page_bg:        int
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:       Renderer
 
 extend Tabs:
     pub def init(labels: List[str], selected_index: int) -> Tabs:
@@ -46,6 +52,7 @@ extend Tabs:
         t.underline = 0x3B82F6
         t.font = Font.load()
         t.page_bg = 0x0B1120
+        t.renderer = default_renderer()
         return t
 
     def slot_w(self, w: int) -> int:
@@ -67,6 +74,13 @@ extend Tabs:
         return true
 
     pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        # Clears the strip's own bounding box first -- this widget draws
+        # only glyphs and a thin underline bar, no full-box background fill,
+        # so nothing else would erase a PREVIOUS frame's underline/label
+        # once the selected tab changes, under a caller that no longer
+        # clears the whole canvas every frame (see examples/widgets_demo).
+        c.fill_rect(x, y, w, h, self.page_bg)
+
         mut sw = self.slot_w(w)
         mut cw = self.font.cell_w()
         mut ch = self.font.cell_h()
@@ -82,7 +96,7 @@ extend Tabs:
             mut color = self.fg
             if i == self.selected_index:
                 color = self.fg_selected
-            draw_text(c, self.font, label, tx, ty, color, self.page_bg)
+            self.renderer.text(c, self.font, label, tx, ty, color, self.page_bg)
 
             if i == self.selected_index:
                 mut bar_w = text_w

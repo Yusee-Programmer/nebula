@@ -1,0 +1,182 @@
+# toolkit.ui.table — a scrollable grid with a header row.
+#
+# Host-owned, same rationale as every widget in this file group (see
+# toolkit.ui.checkbox.Checkbox). Structurally toolkit.ui.list.ScrollList
+# with a fixed header row and multiple columns instead of one string per
+# row -- same row-granularity clipping (a row is fully drawn or not drawn
+# at all; see ScrollList's own header comment for why that is 95% of a real
+# scissor rect for none of the cost), same scroll_offset/max_offset math.
+#
+# Column widths are EQUAL, computed from the given w at paint()/click()
+# time, not stored -- simplest thing that works for a demo grid; a caller
+# wanting uneven columns would need this to grow a `col_w: List[int]`
+# field, not attempted here since nothing in this session needs it.
+#
+#   mut t = Table.init(["Name", "Status", "Owner"], [
+#       ["nebula-core", "green", "you"],
+#       ["render-fix", "yellow", "you"],
+#   ])
+#   ...
+#   if wheel_code_seen: t.scroll(sdl_canvas.last_wheel_delta())
+#   if clicked: t.click_inside(mx, my, fx, fy, fw, fh)
+#   ...
+#   t.paint(canvas, fx, fy, fw, fh)
+
+from toolkit.render.canvas import Canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
+from toolkit.text.font import Font
+
+pub class Table:
+    pub headers:       List[str]
+    pub rows:          List[List[str]]
+    pub scroll_offset:  int
+    pub selected_row:   int   # -1 = none
+    pub hover_row:      int   # -1 = none
+    pub row_h:          int
+    pub header_h:       int
+    pub bg:             int
+    pub header_bg:      int
+    pub header_fg:      int
+    pub row_fg:         int
+    pub row_bg_alt:     int
+    pub hover_bg:        int
+    pub selected_bg:     int
+    pub border:          int
+    pub font:            Font
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer:        Renderer
+
+extend Table:
+    pub def init(headers: List[str], rows: List[List[str]]) -> Table:
+        mut t = Table()
+        t.headers = headers
+        t.rows = rows
+        t.scroll_offset = 0
+        t.selected_row = 0 - 1
+        t.hover_row = 0 - 1
+        t.row_h = 30
+        t.header_h = 32
+        t.bg = 0xFFFFFF
+        t.header_bg = 0xF1F5F9
+        t.header_fg = 0x334155
+        t.row_fg = 0x0F172A
+        t.row_bg_alt = 0xF8FAFC
+        t.hover_bg = 0xEFF6FF
+        t.selected_bg = 0xDBEAFE
+        t.border = 0xE2E8F0
+        t.font = Font.load()
+        t.renderer = default_renderer()
+        return t
+
+    def col_w(self, w: int) -> int:
+        mut n = len(self.headers)
+        if n <= 0:
+            return w
+        return w / n
+
+    def body_h(self, h: int) -> int:
+        mut bh = h - self.header_h
+        if bh < 0:
+            return 0
+        return bh
+
+    def visible_rows(self, h: int) -> int:
+        if self.row_h <= 0:
+            return 0
+        return self.body_h(h) / self.row_h
+
+    def max_offset(self, h: int) -> int:
+        mut over = len(self.rows) - self.visible_rows(h)
+        if over < 0:
+            return 0
+        return over
+
+    # delta follows SdlCanvas.last_wheel_delta()'s convention, same as
+    # ScrollList.scroll -- positive = up / scroll-toward-the-start.
+    pub def scroll(self, delta: int, h: int) -> void:
+        self.scroll_offset = self.scroll_offset - delta
+        if self.scroll_offset < 0:
+            self.scroll_offset = 0
+        mut mx = self.max_offset(h)
+        if self.scroll_offset > mx:
+            self.scroll_offset = mx
+
+    pub def hover_at(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> void:
+        self.hover_row = 0 - 1
+        if mx < x or mx >= x + w:
+            return
+        mut rel_y = my - (y + self.header_h)
+        if rel_y < 0:
+            return
+        mut row_in_view = rel_y / self.row_h
+        mut idx = self.scroll_offset + row_in_view
+        if idx >= 0 and idx < len(self.rows) and row_in_view < self.visible_rows(h):
+            self.hover_row = idx
+
+    pub def click_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
+        if mx < x or mx >= x + w or my < y or my >= y + h:
+            return false
+        if my < y + self.header_h:
+            return true
+        mut row_in_view = (my - (y + self.header_h)) / self.row_h
+        mut idx = self.scroll_offset + row_in_view
+        if idx >= 0 and idx < len(self.rows) and row_in_view < self.visible_rows(h):
+            self.selected_row = idx
+        return true
+
+    pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
+        # Full self-clear first, same reason every widget in this file
+        # group needs it under a caller that no longer clears the whole
+        # canvas every frame (see toolkit.ui.slider.Slider's own comment).
+        c.fill_rect(x, y, w, h, self.bg)
+
+        mut cw = self.col_w(w)
+        mut ch = self.font.cell_h()
+        mut ncols = len(self.headers)
+
+        c.fill_rect(x, y, w, self.header_h, self.header_bg)
+        mut col = 0
+        while col < ncols:
+            self.renderer.text(c, self.font, self.headers[col], x + cw * col + 10, y + (self.header_h - ch) / 2, self.header_fg, self.header_bg)
+            col = col + 1
+        c.fill_rect(x, y + self.header_h - 1, w, 1, self.border)
+
+        mut visible = self.visible_rows(h)
+        mut i = 0
+        while i < visible:
+            mut idx = self.scroll_offset + i
+            if idx >= len(self.rows):
+                i = visible
+            else:
+                mut ry = y + self.header_h + self.row_h * i
+                mut row_bg = self.bg
+                if idx == self.selected_row:
+                    c.fill_rect(x, ry, w, self.row_h, self.selected_bg)
+                    row_bg = self.selected_bg
+                elif idx == self.hover_row:
+                    c.fill_rect(x, ry, w, self.row_h, self.hover_bg)
+                    row_bg = self.hover_bg
+                elif idx % 2 == 1:
+                    c.fill_rect(x, ry, w, self.row_h, self.row_bg_alt)
+                    row_bg = self.row_bg_alt
+
+                mut row = self.rows[idx]
+                mut c2 = 0
+                while c2 < ncols:
+                    if c2 < len(row):
+                        self.renderer.text(c, self.font, row[c2], x + cw * c2 + 10, ry + (self.row_h - ch) / 2, self.row_fg, row_bg)
+                    c2 = c2 + 1
+
+                c.fill_rect(x, ry + self.row_h - 1, w, 1, self.border)
+                i = i + 1
+
+        # Column separators, drawn last so they sit on top of every row's
+        # own fill -- a thin vertical rule the full height of the visible
+        # body, including the header, for a real "grid" look rather than
+        # just striped rows.
+        mut sep = 1
+        while sep < ncols:
+            c.fill_rect(x + cw * sep, y, 1, h, self.border)
+            sep = sep + 1

@@ -28,11 +28,10 @@
 
 from toolkit.types import Event, EventHandler
 from toolkit.ui.parser import UiParser
-from toolkit.ui.interp import Interpreter, render_to, render_into, register_handler, paint_rounded_rect_aa, draw_text
+from toolkit.ui.interp import Interpreter, render_to, render_diff_to, render_into, register_handler, paint_rounded_rect_aa, draw_text
 from toolkit.ui.ast import UiNode
 from toolkit.render.desktop.sdl_canvas import SdlCanvas, poll_event, last_click, last_key, last_wheel_delta, mouse_state
 from toolkit.render.desktop.sdl_canvas import caps
-from toolkit.render.desktop.sdl_bindings import SDL_Delay
 from toolkit.render.canvas import Canvas
 from toolkit.text.font import Font
 from toolkit.ui.checkbox import Checkbox
@@ -57,17 +56,33 @@ from toolkit.ui.list import ScrollList
 # the top-level page, just into (x, y, w, h) instead of the whole surface --
 # so tab content is now authored as markup, with the same class vocabulary,
 # instead of being drawn by hand.
+#
+# Both roots carry an explicit bg-slate-800 (0x1E293B, the same colour
+# render_into()'s own ambient argument below uses) rather than no
+# background class at all: render_into() fully repaints this sub-rect every
+# frame regardless of which tab is selected, but only if something in the
+# tree actually PAINTS that whole rect. Without it, switching from the
+# "Cards" tab (three solid panels) to "Info" (much sparser content) left the
+# previous tab's rects showing through behind the new one's text/badges --
+# chrome's own full-canvas repaint used to paper over this by re-painting
+# everything underneath every frame, but that stopped once the chrome loop
+# switched to diffing (examples/widgets_demo's main loop), which correctly
+# skips repainting a spacer whose own command never changes.
 def tab_source(idx: int) -> str:
     if idx == 0:
-        return "<panel \"flex-row gap-2\">\n  <panel \"grow bg-red-500 rounded-[10px]\" />\n  <panel \"grow bg-green-500 rounded-[10px]\" />\n  <panel \"grow bg-blue-500 rounded-[10px]\" />\n</panel>\n"
-    return "<panel \"flex-col gap-2\">\n  <text \"text-slate-200\">Widgets added this session:</text>\n  <panel \"h-0.5 bg-slate-500\" />\n  <panel \"flex-row gap-2 h-6\">\n    <button \"w-[70px] bg-blue-500 rounded-full justify-center items-center\">\n      <text \"text-white\">8 NEW</text>\n    </button>\n    <button \"w-[60px] bg-green-500 rounded-full justify-center items-center\">\n      <text \"text-slate-900\">LIVE</text>\n    </button>\n  </panel>\n</panel>\n"
+        return "<panel \"flex-row gap-2 bg-slate-800\">\n  <panel \"grow bg-red-500 rounded-[10px]\" />\n  <panel \"grow bg-green-500 rounded-[10px]\" />\n  <panel \"grow bg-blue-500 rounded-[10px]\" />\n</panel>\n"
+    return "<panel \"flex-col gap-2 bg-slate-800\">\n  <text \"text-slate-200\">Widgets added this session:</text>\n  <panel \"h-0.5 bg-slate-500\" />\n  <panel \"flex-row gap-2 h-6\">\n    <button \"w-[70px] bg-blue-500 rounded-full justify-center items-center\">\n      <text \"text-white\">8 NEW</text>\n    </button>\n    <button \"w-[60px] bg-green-500 rounded-full justify-center items-center\">\n      <text \"text-slate-900\">LIVE</text>\n    </button>\n  </panel>\n</panel>\n"
 
 # A small section-header label + a thin rule beneath it -- the same
 # Divider-as-plain-panel composition the file header comment calls out, just
 # host-painted here alongside the other host-drawn pieces of this screen
 # rather than mixed into the markup tree.
 def paint_section_label(c: Canvas, font: Font, text: str, x: int, y: int, w: int) -> void:
-    draw_text(c, font, text, x, y, 0x94A3B8, 0x0B1120)
+    # 0x1E293B (bg-slate-800), not 0x0B1120 -- this label sits on chrome's
+    # h-[400px] spacer, the same region every host-painted widget below does
+    # (see the page_bg comment above Tabs.init() in main()), not on the bare
+    # canvas.
+    draw_text(c, font, text, x, y, 0x94A3B8, 0x1E293B)
     c.fill_rect(x, y + 20, w, 1, 0x334155)
 
 pub class OkHandler implements EventHandler:
@@ -84,19 +99,17 @@ extend OkHandler:
 
 def main():
     # 460x560 logical pixels -- deliberately well under a 1280x720 display.
-    # Note "logical": this window is not marked DPI-aware, so on a scaled
-    # display (125%/150%/etc) Windows stretches the whole surface by that
-    # factor when presenting it, and the ACTUAL on-screen footprint can end
-    # up taller than the number below -- verified on this session's own dev
-    # machine, where the rendered window's real GetWindowRect comes back
-    # noticeably larger than 460x560. A first version of this demo used
-    # 800px and was cut off outright; this size at least keeps the important
-    # top two-thirds (header, tabs, Preferences, Appearance) on-screen on a
-    # scaled display too. A properly DPI-aware window is a real fix for this,
-    # not attempted here -- out of scope for a widget-visuals pass.
+    # A first version of this demo used 800px and was cut off outright; this
+    # size keeps the whole window on-screen with room to spare.
+    #
+    # (This comment used to warn that the window wasn't DPI-aware and would
+    # get bitmap-stretched by Windows on a scaled display, taller on-screen
+    # than the numbers below -- SdlCanvas.open() fixed that in a later
+    # session, see its own DPI comment; stale here since, left corrected
+    # rather than silently dropped.)
     mut w = 460
     mut h = 560
-    mut canvas = SdlCanvas.open("Tauraro UI Toolkit -- widgets_demo", w, h)
+    mut canvas = SdlCanvas.open_vsync("Tauraro UI Toolkit -- widgets_demo", w, h)
     if not canvas.ok():
         print("failed to open an SDL window/renderer")
         return
@@ -130,6 +143,17 @@ def main():
     mut tab_trees: List[Pointer[UiNode]] = [tp0.parse(tab_source(0)), tp1.parse(tab_source(1))]
 
     mut tabs = Tabs.init(["Cards", "Info"], 0)
+    # Every host-painted widget below sits on the chrome tree's h-[400px]
+    # spacer, which is bg-slate-800 (0x1E293B) -- NOT each widget's own
+    # 0x0B1120 default (the canvas's own clear colour, correct only for a
+    # widget placed directly on the bare canvas). Left at the default, every
+    # widget's antialiased outer edge blends against the wrong backdrop --
+    # subtly for a few-pixel-wide AA blend, glaringly for Tabs/Slider, which
+    # also use page_bg to clear their own full bounding box every frame now
+    # that this loop no longer clears the whole canvas (see their own
+    # paint() comments). Same value render_into() already passes as this
+    # region's ambient a few lines below.
+    tabs.page_bg = 0x1E293B
     mut tx = 16
     mut ty = 92
     mut tw = 428
@@ -143,6 +167,7 @@ def main():
     mut prefs_label_y = 194
 
     mut notify_cb = Checkbox.init(true)
+    notify_cb.page_bg = 0x1E293B
     mut ncx = 16
     mut ncy = 222
     mut nch = 18
@@ -152,12 +177,16 @@ def main():
     mut theme_light = Radio.init(true)
     mut theme_dark = Radio.init(false)
     mut theme_auto = Radio.init(false)
+    theme_light.page_bg = 0x1E293B
+    theme_dark.page_bg = 0x1E293B
+    theme_auto.page_bg = 0x1E293B
     mut theme_group: List[Radio] = [theme_light, theme_dark, theme_auto]
     mut rrx = 16
     mut rry = 272
     mut rspacing = 100
 
     mut autoupdate_sw = Switch.init(false)
+    autoupdate_sw.page_bg = 0x1E293B
     mut swx = 384
     mut swy = 270
     mut sww = 44
@@ -166,18 +195,21 @@ def main():
     mut appearance_label_y = 308
 
     mut brightness_sl = Slider.init(0, 100, 65)
+    brightness_sl.page_bg = 0x1E293B
     mut slx = 16
     mut sly = 332
     mut slw = 428
     mut slh = 22
 
     mut brightness_pb = ProgressBar.init(65)
+    brightness_pb.page_bg = 0x1E293B
     mut pbx = 16
     mut pby = 358
     mut pbw = 428
     mut pbh = 10
 
     mut accent_dd = Dropdown.init(["Blue", "Green", "Violet", "Amber"], 0)
+    accent_dd.page_bg = 0x1E293B
     mut ddx = 16
     mut ddy = 380
     mut ddw = 200
@@ -192,6 +224,32 @@ def main():
     mut lsh = 56
 
     print("window open -- checkbox/radio/switch/slider/dropdown/list/tabs all live. close the window to quit")
+
+    # Proposal v4 step I, wired in: the chrome tree (header/footer, the only
+    # part of this screen actually driven by the scene graph) is now
+    # diff-rendered instead of fully repainted every frame. render_diff_to()'s
+    # own contract requires the caller to stop clearing every frame -- ONE
+    # clear here, matching chrome's clear colour, covers whatever the very
+    # first frame's framebuffer contents were; every frame after relies on
+    # chrome's own root panel (bg-slate-800, sized to the full canvas by
+    # layout_tree) as the thing that "clears" -- it already painted 100% of
+    # the window on frame 1, so nothing further needs resetting.
+    #
+    # Every host-painted widget below fully repaints its own FIXED-size rect
+    # every frame regardless of diffing, so none of them needed converting
+    # into the scene graph to stay correct under this change -- except one.
+    # Dropdown is the one widget whose painted footprint SHRINKS: open, it
+    # draws its list overlay past its own closed-bar rect; closed, it only
+    # draws the bar. Diffing only skips repainting chrome commands that
+    # DIDN'T change -- it has no idea Dropdown just stopped covering pixels
+    # chrome never owned in the first place, so on the frame Dropdown closes,
+    # `it.has_last_scene` is reset to force one full chrome repaint, which
+    # overpaints the stale overlay before Dropdown draws its now-smaller bar
+    # on top. This is the gap nebula1.0.md section 6 (Phase 1) flagged as
+    # blocking diffing here -- turned out to be one widget, not a rewrite of
+    # all seven into the scene graph.
+    mut dd_prev_open = false
+    canvas.clear(0x0B1120)
 
     mut running = true
     while running:
@@ -243,22 +301,37 @@ def main():
             brightness_pb.set_value(brightness_sl.value)
             autoupdate_sw.tick()
 
-            canvas.clear(0x0B1120)
-            # Shadow drawn BEFORE the chrome tree, so it sits underneath the
-            # header card (render_to paints the card's own bg on top of it,
-            # covering everything but the soft edge peeking out past the
-            # card's own rect) -- not painted after, which would draw it OVER
-            # the card instead of behind it.
+            # Dropdown just closed since the frame we last painted: its list
+            # overlay covered pixels chrome never owned, and diffing has no
+            # way to know they need clearing (nothing else's Cmd changed) --
+            # force one full chrome repaint so it overpaints them, matching
+            # what the caller-side comment above the loop explains.
+            if dd_prev_open and not accent_dd.open:
+                it.has_last_scene = false
+
+            # SDL_SetRenderDrawBlendMode(blend) means draw_shadow COMPOSITES
+            # onto whatever is already there, not writes an absolute colour
+            # -- drawing it every frame the way the old canvas.clear()-every-
+            # frame loop did would be fine (clear reset the surface first
+            # each time), but under diffing there is no such reset, so
+            # redrawing it on a frame chrome DOESN'T fully repaint would
+            # blend it onto its own previous result and visibly darken over
+            # time. Tying it to the same "about to fully repaint anyway"
+            # condition chrome itself is about to take keeps the two in sync
+            # by construction: whenever chrome's header card gets its opaque
+            # bg repainted, the shadow beneath it is refreshed in the same
+            # frame; on every other frame neither is touched, and the
+            # previously-painted edge is still correct because nothing
+            # changed there.
             #
             # Proposal v4 step B: gated on Caps.shadows rather than assuming
-            # every Canvas has draw_shadow. This demo is SDL2-only today, so
-            # the check is always true here -- but it's the pattern any
-            # future shared (backend-agnostic) code should follow instead of
-            # hardcoding "SDL2 means shadows work", the assumption this exact
-            # call site used to bake in silently.
-            if caps().shadows:
+            # every Canvas has draw_shadow -- the pattern any future shared
+            # (backend-agnostic) code should follow instead of hardcoding
+            # "SDL2 means shadows work".
+            mut will_full_repaint = not it.has_last_scene
+            if will_full_repaint and caps().shadows:
                 canvas.draw_shadow(16, 16, 428, 64, 12)
-            render_to(it, chrome_tree, canvas)
+            render_diff_to(it, chrome_tree, canvas)
 
             tabs.paint(canvas, tx, ty, tw, th)
             # Tab content as markup, rendered into its own sub-rectangle.
@@ -277,13 +350,13 @@ def main():
 
             paint_section_label(canvas, ui_font, "PREFERENCES", 16, prefs_label_y, 428)
             notify_cb.paint(canvas, ncx, ncy, nch, nch)
-            draw_text(canvas, ui_font, "Enable notifications", ncx + nch + 10, ncy + 1, 0xE2E8F0, 0x0B1120)
+            draw_text(canvas, ui_font, "Enable notifications", ncx + nch + 10, ncy + 1, 0xE2E8F0, 0x1E293B)
 
-            draw_text(canvas, ui_font, "Theme", 16, theme_label_y, 0x94A3B8, 0x0B1120)
+            draw_text(canvas, ui_font, "Theme", 16, theme_label_y, 0x94A3B8, 0x1E293B)
             theme_light.paint(canvas, rrx, rry, nch, nch)
             theme_dark.paint(canvas, rrx + rspacing, rry, nch, nch)
             theme_auto.paint(canvas, rrx + rspacing * 2, rry, nch, nch)
-            draw_text(canvas, ui_font, "Auto-update", swx - 110, swy + 3, 0xE2E8F0, 0x0B1120)
+            draw_text(canvas, ui_font, "Auto-update", swx - 110, swy + 3, 0xE2E8F0, 0x1E293B)
             autoupdate_sw.paint(canvas, swx, swy, sww, swh)
 
             paint_section_label(canvas, ui_font, "APPEARANCE", 16, appearance_label_y, 428)
@@ -300,8 +373,17 @@ def main():
             # -- the same reason its click_inside is also offered last.
             accent_dd.paint(canvas, ddx, ddy, ddw, ddh)
 
+            # Captured AFTER this frame's paint, compared at the START of
+            # next frame's -- "was it open in the frame we last drew" is
+            # exactly the transition the guard above needs to catch.
+            dd_prev_open = accent_dd.open
+
+            # No SDL_Delay: open_vsync()'s PRESENTVSYNC already blocks this
+            # present() until the next display refresh, which paces the loop
+            # on its own -- an explicit delay on top would stack with that
+            # wait and roughly halve the frame rate (see open_vsync()'s own
+            # comment in toolkit.render.desktop.sdl_canvas).
             canvas.present()
-            unsafe: SDL_Delay(16 as Uint32)
 
     canvas.close()
     print("window closed")

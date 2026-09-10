@@ -21,7 +21,8 @@
 # interaction in.
 
 from toolkit.render.canvas import Canvas
-from toolkit.ui.interp import paint_rounded_rect_aa, fill_circle_ring_aa
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
 
 pub class Slider:
     pub min:      int
@@ -42,6 +43,18 @@ pub class Slider:
     # paint() stashes it here so drag_to only needs the moving mx.
     pub origin_x: int
     pub origin_w: int
+    pub origin_h: int
+    # The thumb's pixel position while actively dragging, tracked directly
+    # from the mouse rather than reconstructed from `value` -- see drag_to()
+    # for why: deriving the thumb's x from the rounded integer value alone
+    # makes it jump in whole travel/span-pixel increments (roughly 7-8px on
+    # a 0..100 slider spanning a few hundred pixels), which reads as
+    # "teleporting" during a slow, deliberate drag even though the VALUE
+    # itself is updating correctly every frame.
+    pub drag_tx: int
+    # See toolkit.ui.checkbox.Checkbox.renderer's comment -- same reason, same
+    # default.
+    pub renderer: Renderer
 
 extend Slider:
     pub def init(min: int, max: int, value: int) -> Slider:
@@ -56,7 +69,10 @@ extend Slider:
         s.value = min
         s.origin_x = 0
         s.origin_w = 0
+        s.origin_h = 0
+        s.drag_tx = 0
         s.page_bg = 0x0B1120
+        s.renderer = default_renderer()
         s.set_value(value)
         return s
 
@@ -68,21 +84,23 @@ extend Slider:
             v = self.max
         self.value = v
 
-    def value_to_x(self, x: int, w: int) -> int:
+    def value_to_x(self, x: int, w: int, h: int) -> int:
         mut span = self.max - self.min
+        mut tm = travel_margin(h)
         if span <= 0:
-            return x
-        mut travel = w - travel_margin() * 2
-        return x + travel_margin() + travel * (self.value - self.min) / span
+            return x + tm
+        mut travel = w - tm * 2
+        return x + tm + travel * (self.value - self.min) / span
 
-    def x_to_value(self, mx: int, x: int, w: int) -> int:
+    def x_to_value(self, mx: int, x: int, w: int, h: int) -> int:
         mut span = self.max - self.min
         if span <= 0:
             return self.min
-        mut travel = w - travel_margin() * 2
+        mut tm = travel_margin(h)
+        mut travel = w - tm * 2
         if travel <= 0:
             return self.min
-        mut rel = mx - x - travel_margin()
+        mut rel = mx - x - tm
         if rel < 0:
             rel = 0
         if rel > travel:
@@ -96,40 +114,93 @@ extend Slider:
     pub def press_inside(self, mx: int, my: int, x: int, y: int, w: int, h: int) -> bool:
         if my < y or my >= y + h:
             return false
-        mut tx = self.value_to_x(x, w)
+        mut tx = self.value_to_x(x, w, h)
         mut hit_r = h
         if mx < tx - hit_r or mx > tx + hit_r:
             return false
         self.dragging = true
+        self.origin_h = h
+        # Starts exactly at the settled value's own pixel position, not at
+        # the click's raw mx -- clicking slightly off-center on the thumb
+        # (anywhere within hit_r) would otherwise snap the thumb to the
+        # cursor immediately, a small jump of its own right at drag start.
+        self.drag_tx = tx
         return true
 
     pub def drag_to(self, mx: int) -> void:
         if not self.dragging:
             return
-        self.set_value(self.x_to_value(mx, self.origin_x, self.origin_w))
+        self.set_value(self.x_to_value(mx, self.origin_x, self.origin_w, self.origin_h))
+        # Pixel-perfect thumb tracking: clamp mx to the same travel bounds
+        # x_to_value() clamps to internally, but keep it in raw pixels
+        # rather than round-tripping through the rounded integer value (see
+        # this field's own comment on the class for why that round-trip is
+        # the actual "teleporting" a real drag showed).
+        mut tm = travel_margin(self.origin_h)
+        mut lo = self.origin_x + tm
+        mut hi = self.origin_x + self.origin_w - tm
+        mut clamped = mx
+        if clamped < lo:
+            clamped = lo
+        if clamped > hi:
+            clamped = hi
+        self.drag_tx = clamped
 
     pub def paint(self, c: Canvas, x: int, y: int, w: int, h: int) -> void:
         self.origin_x = x
         self.origin_w = w
+        self.origin_h = h
+
+        # Clears a margin WIDER than (x, y, w, h) on every side, not exactly
+        # that rect: fill_circle_ring_aa's own AA feather draws up to
+        # (radius + 1) from the thumb's center (see its "yy = -r-1 to r+1"
+        # loop), one pixel past the nominal radius. Since travel_margin
+        # below now keeps the thumb's CENTER at least a full radius away
+        # from x and x+w, the thumb's own circle never crosses x or x+w --
+        # but that 1px feather still pokes past y and y+h at the top/bottom
+        # of every frame regardless of thumb position, and clearing exactly
+        # (x, y, w, h) left it uncleared -- the "scratches" a real drag
+        # showed. Padded by 4, not the computed minimum of 1, so an
+        # off-by-one in exactly where fill_rect's own bounds land relative
+        # to this math (inclusive vs. exclusive of the last row/column)
+        # can't reopen the same gap -- confirmed the 1px-margin version
+        # still leaked a dashed line into whatever sat right below (see
+        # examples/desktop_shell's ProgressBar spacing fix, same bug).
+        c.fill_rect(x - 4, y - 4, w + 8, h + 8, self.page_bg)
 
         mut track_h = 6
         mut track_y = y + (h - track_h) / 2
-        paint_rounded_rect_aa(c, x + travel_margin(), track_y, w - travel_margin() * 2, track_h, track_h / 2, self.track, self.page_bg)
+        mut tm = travel_margin(h)
+        self.renderer.rounded_rect(c, x + tm, track_y, w - tm * 2, track_h, track_h / 2, self.track, self.page_bg)
 
-        mut tx = self.value_to_x(x, w)
-        mut fill_w = tx - (x + travel_margin())
+        # While actively dragging, follow the mouse pixel-for-pixel
+        # (drag_tx) instead of re-deriving the thumb's position from the
+        # rounded integer value -- see drag_tx's own field comment. Once
+        # released, dragging is false and this reverts to the settled
+        # value's own position, which is exactly where drag_to() last left
+        # drag_tx anyway (so there is no visible snap on release).
+        mut tx = self.value_to_x(x, w, h)
+        if self.dragging:
+            tx = self.drag_tx
+        mut fill_w = tx - (x + tm)
         if fill_w > 0:
-            paint_rounded_rect_aa(c, x + travel_margin(), track_y, fill_w, track_h, track_h / 2, self.fill, self.track)
+            self.renderer.rounded_rect(c, x + tm, track_y, fill_w, track_h, track_h / 2, self.fill, self.track)
 
         # The thumb straddles the fill/track boundary, so neither color is a
         # fully correct backdrop for its own AA edge -- self.fill is the
         # closer approximation in practice (the thumb sits right at the
         # filled edge, so more of its ring overlaps fill than bare track).
         mut r = h / 2
-        fill_circle_ring_aa(c, tx, y + h / 2, r, 3, self.thumb, self.thumb_border, self.fill)
+        self.renderer.circle_ring(c, tx, y + h / 2, r, 3, self.thumb, self.thumb_border, self.fill)
 
-# Half the thumb's radius, roughly -- keeps the thumb from ever being asked to
-# sit exactly at the track's outer edge, where half of it would render past
-# the widget's own bounding box.
-def travel_margin() -> int:
-    return 10
+# The thumb's own radius (h/2) -- keeps the thumb's CENTER at least a full
+# radius away from x and x+w, so its circle (radius h/2) never crosses the
+# widget's own left/right edges. This used to be a flat 10px regardless of
+# h, which was fine back when every caller used h close to 20-22 (r~10-11)
+# but broke silently once a caller sized the whole widget up for a smoother
+# curve (see examples/desktop_shell): at h=32 (r=16), a flat 10px margin let
+# the thumb's circle draw up to 6px past the widget's own x/x+w at the
+# extremes of the range -- outside what paint()'s self-clear rect covers no
+# matter how it's padded, since it's relative to (x, w), not (x - 6, w + 12).
+def travel_margin(h: int) -> int:
+    return h / 2

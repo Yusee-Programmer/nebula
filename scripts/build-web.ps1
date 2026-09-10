@@ -1,4 +1,4 @@
-# Build a Nebula program into a browser-loadable .wasm.
+﻿# Build a Nebula program into a browser-loadable .wasm.
 #
 #   .\scripts\build-web.ps1
 #   .\scripts\build-web.ps1 -Source examples\web_demo\render_web.tr -OutDir build-web
@@ -42,7 +42,16 @@
 param(
     [string]$Source = "examples\web_demo\render_web.tr",
     [string]$OutDir = "build-web",
-    [int]$MemoryMB  = 64
+    [int]$MemoryMB  = 64,
+    # zig optimisation level. ReleaseSmall produces a much smaller .wasm, but
+    # the LLVM work to get there is memory-hungry: linking this toolkit's ~33
+    # C files was measured at 8.8 GB working set on this box, which on a
+    # machine with less headroom gets the linker OOM-killed partway -- and it
+    # presents as a build that simply never finishes rather than as an error.
+    # Debug links in a fraction of the memory and time, at the cost of a much
+    # bigger module. Use Debug to iterate, ReleaseSmall to ship or measure.
+    [ValidateSet("Debug","ReleaseSafe","ReleaseFast","ReleaseSmall")]
+    [string]$Opt = "ReleaseSmall"
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,7 +97,7 @@ $zigArgs = @(
     "-fno-entry",
     "-rdynamic",
     "--import-symbols",
-    "-O", "ReleaseSmall",
+    "-O", $Opt,
     "--export=__heap_base",
     "--initial-memory=$bytes",
     "--name", "nebula",

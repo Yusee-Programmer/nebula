@@ -568,7 +568,7 @@ CAUSE
 
   The codebase had ALREADY found and fixed the identical gap once before,
   but only for REASSIGNMENT (`x = obj.field` where `x` already exists) and
-  field-to-field STORES (`a.f = b.g`) -- both carry a comment tagged "#21"
+  field-to-field STORES (`a.f = b.g`) -- b oth carry a comment tagged "#21"
   explaining precisely this same UAF and manually retaining around it. The
   fix was simply never extended to the first-declaration paths, which is
   exactly what nebula's repro hit (`mut captured = h.root.key`).

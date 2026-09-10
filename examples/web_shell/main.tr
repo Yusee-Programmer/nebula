@@ -157,12 +157,23 @@ pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int,
     mut oy = card.y
     mut inner_w = 560
 
-    mut cby = oy + 76
-    mut rry = cby + 44
-    mut swy = rry + 44
-    mut sly = swy + 46
-    mut lsy = sly + 46
-    mut lsh = 140
+    # Row strides. Each row's stride has to clear BOTH the previous row's own
+    # height AND the 22px a section label occupies above its row (labels are
+    # drawn at `rowY - 22`). Getting that wrong does not error -- it silently
+    # paints one thing on top of another, which is exactly what happened here
+    # before: "Brightness" landed inside the switch, and "Recent items" landed
+    # under the progress bar.
+    #
+    # The two rows that are easy to under-budget:
+    #   * the switch is 26 tall, not the 18-20 the rows above it are;
+    #   * the slider row is really TWO widgets -- slider (24) plus the progress
+    #     bar 32px below it (10) -- so it occupies 42px, not 24.
+    mut cby = oy + 76        # checkbox   (20 tall, no label above)
+    mut rry = cby + 52       # radios     (18 tall, label at rry-22)
+    mut swy = rry + 34       # switch     (26 tall, inline label to its right)
+    mut sly = swy + 60       # slider+bar (42 tall overall, label at sly-22)
+    mut lsy = sly + 76       # list       (label at lsy-22)
+    mut lsh = 120
 
     mut cbx = ox + 20
     mut rrx = ox + 20

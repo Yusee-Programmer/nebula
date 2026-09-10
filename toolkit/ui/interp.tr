@@ -13,10 +13,13 @@
 from toolkit.types import Event, EventHandler, event_name_for_kind, ev_key, rgb, red_of, green_of, blue_of
 from toolkit.ui.ast import UiNode, max_depth
 from toolkit.ui.style import StyleCache, unset
-from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text, cmd_clip_push, cmd_clip_pop, cmd_eq, scenes_diffable, scene_has_clip
+from toolkit.render.scene import Scene, Cmd, cmd_rounded_rect, cmd_rounded_box, cmd_text, cmd_clip_push, cmd_clip_pop, cmd_circle, cmd_circle_ring, cmd_eq, scenes_diffable, scene_has_clip
 from toolkit.layout.flex import LayoutBox, layout_tree, layout_tree_at, kind_text
 from toolkit.render.canvas import Canvas
 from toolkit.render.clipped_canvas import clip_canvas
+from toolkit.render.renderer import Renderer
+from toolkit.render.software_renderer import default_renderer
+from toolkit.ui.widget_tags import tag_checkbox, tag_switch, tag_radio, tag_slider, tag_progress, tag_tabitem, tag_listitem, is_widget_tag
 from toolkit.text.font import Font, Fonts
 from string.str import Str
 from math.int import Math
@@ -53,6 +56,17 @@ pub class Interpreter:
     pub hover_x:  int
     pub hover_y:  int
     pub pressed:  bool
+    # Markup-tag widgets (phase 1: checkbox/switch/radio/slider/progress):
+    # a `<slider>` node dragging needs the CURRENT mouse position while the
+    # button is held, the same way hover_x/hover_y already are -- set every
+    # frame by the caller alongside hover_x/hover_y/pressed, before
+    # render()/render_diff(). Left at (-1,-1) for a caller that never sets
+    # them (every existing example): harmless, since nothing reads these
+    # unless a node's own drag state (Interpreter.state, "#dragging" suffix)
+    # is already active, which only a `<slider>` tag can set in the first
+    # place -- see emit()'s slider branch.
+    pub mouse_x:  int
+    pub mouse_y:  int
     # The flat color the canvas was actually cleared to before this frame's
     # render() call -- the root of the "what's behind me" chain every panel's
     # anti-aliased edges blend against (see paint()'s own comment for the
@@ -69,6 +83,15 @@ pub class Interpreter:
     # progress) is representable as one int, and a second typed store can be
     # added later without disturbing this one if that stops being true.
     pub state:    Dict[str, int]
+    # Markup-tag widgets (phase 1): the same "every widget class already has
+    # one, defaulted the same way" field every host-owned widget
+    # (toolkit.ui.checkbox.Checkbox etc.) already carries -- see
+    # toolkit.render.software_renderer's own comment on why a concrete
+    # class can't be assigned to an interface-typed field directly
+    # (a real compiler gap; default_renderer() is the workaround). Reassign
+    # to `gl_renderer_of(canvas)`/`canvas2d_renderer_of(canvas)` for GPU/
+    # Canvas2D quality, exactly like every other widget's `.renderer` field.
+    pub renderer: Renderer
 
 extend Interpreter:
     pub def init() -> Interpreter:
@@ -83,8 +106,11 @@ extend Interpreter:
         it.hover_x = 0 - 1
         it.hover_y = 0 - 1
         it.pressed = false
+        it.mouse_x = 0 - 1
+        it.mouse_y = 0 - 1
         it.root_bg = 0x0B1120
         it.state = {}
+        it.renderer = default_renderer()
         return it
 
     # Proposal v4 step F: read a node's persisted state, or `default` if
@@ -170,7 +196,7 @@ extend Interpreter:
         # working unchanged, and the scene graph stays an internal detail
         # rather than a breaking change to the four shipping tiers.
         mut scene = self.build_scene(self.root_bg)
-        execute_software(scene, c, self.fonts)
+        execute_software(scene, c, self.fonts, self.renderer)
 
     # Renders a tree into a SUB-RECTANGLE instead of the whole canvas.
     #
@@ -189,7 +215,7 @@ extend Interpreter:
         self.has_root = true
         self.renders = self.renders + 1
         mut scene = self.build_scene(ambient)
-        execute_software(scene, c, self.fonts)
+        execute_software(scene, c, self.fonts, self.renderer)
 
     # Proposal v4 step I: like render(), but repaints only the commands that
     # actually changed since the last render_diff() call on this Interpreter
@@ -221,9 +247,9 @@ extend Interpreter:
         # region. Always correct (full repaint), not yet optimized, for
         # any frame that uses clip.
         if self.has_last_scene and scenes_diffable(self.last_scene, scene) and not scene_has_clip(scene):
-            execute_diff(self.last_scene, scene, c, self.fonts)
+            execute_diff(self.last_scene, scene, c, self.fonts, self.renderer)
         else:
-            execute_software(scene, c, self.fonts)
+            execute_software(scene, c, self.fonts, self.renderer)
         self.last_scene = scene
         self.has_last_scene = true
 
@@ -320,6 +346,16 @@ extend Interpreter:
             # different thing whenever the box itself painted something.
             scene.add(Cmd.label(box.x, box.y, box.text, box.style.fg, child_ambient, box.style.font_size))
 
+        # Markup-tag widgets (phase 1): checkbox/switch/radio/slider/progress
+        # paint themselves here, on `child_ambient` -- the same backdrop this
+        # box's own children would see -- since a bare `<checkbox/>` almost
+        # never sets its own bg (nothing above this point painted anything to
+        # sit on top of). Gated on tag rather than kind: these are all
+        # kind_element() nodes, same as a plain `<panel>`, so `box.tag` is
+        # the only thing that tells them apart.
+        if is_widget_tag(box.tag):
+            child_ambient = self.emit_widget(box, scene, child_ambient)
+
         # nebula1.0 Phase 2 (clipping): `clip` bounds everything painted by
         # this box's CHILDREN to this box's own rect -- not this box's own
         # background/border above, which paint unclipped (matches CSS:
@@ -336,6 +372,197 @@ extend Interpreter:
 
         if box.style.clip:
             scene.add(Cmd.clip_pop())
+
+    # Markup-tag widgets (phase 1): one branch per tag, porting the exact
+    # geometry/colors each widget's own host-owned `.paint()` already used
+    # (toolkit/ui/checkbox.tr and friends -- see each for the reasoning
+    # behind its specific numbers, not repeated here) but emitting `Cmd`s
+    # into `scene` instead of calling a renderer directly, the same
+    # scene-graph discipline every other shape in `emit()` already follows.
+    #
+    # Persisted/live values read through `state_get`/`anim_toward` (Proposal
+    # v4 step F/G, keyed on `box.node_key` bare for a widget's OWN primary
+    # value, with a `#`-suffixed secondary key for anything that needs one --
+    # `#knob` for the switch's animated slide, `#dragging` for the slider's
+    # drag flag -- so a widget's own bookkeeping can never collide with the
+    # bare key its primary value lives at, or with the unrelated `#hover`
+    # suffix `emit()` already uses above for hover/press darkening). The
+    # FIRST read of an unset key falls back to the value the markup author
+    # declared (`box.w_checked`/`w_selected`/`w_value`), so a widget's
+    # initial frame shows exactly what its tag asked for; every frame after
+    # shows whatever the last interaction (hit_test_widget, below) set.
+    #
+    # Phase 2 ("Nebula Studio"): returns the ambient color this box's OWN
+    # children should blend their antialiased edges against, instead of
+    # `void`. The five phase-1 tags are leaves (no children) and just hand
+    # back `ambient_bg` unchanged -- but `tabitem`/`listitem` are
+    # containers wrapping a `<text>` label, and when one paints its own
+    # dynamic highlight (a selected tab/row), that highlight -- not
+    # whatever was behind the box before this call -- is the real backdrop
+    # its label now sits on. Without this, the label's glyph-edge blend
+    # would target the WRONG color on every highlighted tab/row (see
+    # emit()'s own call site, `child_ambient = self.emit_widget(...)`).
+    def emit_widget(self, box: LayoutBox, scene: Scene, ambient_bg: int) -> int:
+        if box.tag == tag_checkbox():
+            mut checked = self.state_get(box.node_key, b2i(box.w_checked)) != 0
+            mut bg_off = 0xFFFFFF
+            mut bg_on = 0x3B82F6
+            mut border = 0x64748B
+            mut mark = 0xFFFFFF
+            if checked:
+                scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, 4, bg_on, ambient_bg))
+            else:
+                scene.add(Cmd.rounded_box(box.x, box.y, box.w, box.h, 4, 2, bg_off, border, ambient_bg))
+            if checked:
+                mut thick = box.w / 8
+                if thick < 1:
+                    thick = 1
+                emit_thick_line(scene, box.x + box.w * 28 / 100, box.y + box.h * 52 / 100, box.x + box.w * 42 / 100, box.y + box.h * 68 / 100, thick, mark, bg_on)
+                emit_thick_line(scene, box.x + box.w * 42 / 100, box.y + box.h * 68 / 100, box.x + box.w * 74 / 100, box.y + box.h * 32 / 100, thick, mark, bg_on)
+            return ambient_bg
+
+        if box.tag == tag_switch():
+            mut on = self.state_get(box.node_key, b2i(box.w_checked)) != 0
+            mut track_off = 0xCBD5E1
+            mut track_on = 0x3B82F6
+            mut knob = 0xFFFFFF
+            mut track = track_off
+            if on:
+                track = track_on
+            mut target = 0
+            if on:
+                target = 100
+            # See anim_toward's own comment: an unset "#knob" key starts
+            # already AT `target`, so a switch's first-ever frame renders
+            # snapped to its declared initial state rather than animating in
+            # from a bogus 0 -- exactly Switch.init()'s own behaviour.
+            mut knob_pos = self.anim_toward(box.node_key + "#knob", target, 12)
+            scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, box.h / 2, track, ambient_bg))
+            mut r = box.h / 2 - 2
+            mut travel = box.w - box.h
+            mut knob_x = box.x + box.h / 2 + travel * knob_pos / 100
+            mut knob_y = box.y + box.h / 2
+            scene.add(Cmd.circle(knob_x, knob_y, r, knob, track))
+            return ambient_bg
+
+        if box.tag == tag_radio():
+            mut selected = self.state_get(box.node_key, b2i(box.w_selected)) != 0
+            mut ring = 0x64748B
+            mut accent = 0x3B82F6
+            mut fill = 0xFFFFFF
+            mut r = box.w / 2
+            if box.h / 2 < r:
+                r = box.h / 2
+            mut cx = box.x + box.w / 2
+            mut cy = box.y + box.h / 2
+            mut ring_color = ring
+            if selected:
+                ring_color = accent
+            scene.add(Cmd.circle_ring(cx, cy, r, 2, fill, ring_color, ambient_bg))
+            if selected:
+                scene.add(Cmd.circle(cx, cy, r - 5, accent, fill))
+            return ambient_bg
+
+        if box.tag == tag_slider():
+            mut span = box.w_max - box.w_min
+            mut tm = box.h / 2
+            mut travel = box.w - tm * 2
+            mut value = self.state_get(box.node_key, box.w_value)
+            if value < box.w_min:
+                value = box.w_min
+            if value > box.w_max:
+                value = box.w_max
+
+            # Continues an in-progress drag (started by hit_test_widget's
+            # press-on-thumb check) using the CURRENT mouse position, exactly
+            # like Slider.drag_to() did -- self-heals the moment `pressed`
+            # goes false, so a drag can never get stuck active if a release
+            # event is ever missed (e.g. the pointer leaves the window).
+            mut dragging = self.state_get(box.node_key + "#dragging", 0) != 0
+            mut tx = box.x + tm
+            if span > 0 and travel > 0:
+                tx = box.x + tm + travel * (value - box.w_min) / span
+            if dragging:
+                if self.pressed:
+                    mut clamped = self.mouse_x
+                    if clamped < box.x + tm:
+                        clamped = box.x + tm
+                    if clamped > box.x + box.w - tm:
+                        clamped = box.x + box.w - tm
+                    tx = clamped
+                    if span > 0 and travel > 0:
+                        mut rel = clamped - box.x - tm
+                        value = box.w_min + span * rel / travel
+                    self.state_set(box.node_key, value)
+                else:
+                    self.state_set(box.node_key + "#dragging", 0)
+            else:
+                self.state_set(box.node_key, value)
+
+            mut track_h = 6
+            mut track_y = box.y + (box.h - track_h) / 2
+            mut track = 0xE2E8F0
+            mut fill = 0x3B82F6
+            mut thumb = 0xFFFFFF
+            mut thumb_border = 0x3B82F6
+            scene.add(Cmd.rounded_rect(box.x + tm, track_y, box.w - tm * 2, track_h, track_h / 2, track, ambient_bg))
+            mut fill_w = tx - (box.x + tm)
+            if fill_w > 0:
+                scene.add(Cmd.rounded_rect(box.x + tm, track_y, fill_w, track_h, track_h / 2, fill, track))
+            mut thumb_r = box.h / 2
+            scene.add(Cmd.circle_ring(tx, box.y + box.h / 2, thumb_r, 3, thumb, thumb_border, fill))
+            return ambient_bg
+
+        if box.tag == tag_progress():
+            mut value = self.state_get(box.node_key, box.w_value)
+            if value < 0:
+                value = 0
+            if value > 100:
+                value = 100
+            mut track = 0xE2E8F0
+            mut fill = 0x22C55E
+            mut r = box.h / 2
+            scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, r, track, ambient_bg))
+            mut fw = box.w * value / 100
+            if fw > 0:
+                scene.add(Cmd.rounded_rect(box.x, box.y, fw, box.h, r, fill, track))
+            return ambient_bg
+
+        if box.tag == tag_tabitem():
+            mut selected = self.state_get(box.node_key, b2i(box.w_selected)) != 0
+            if not selected:
+                return ambient_bg
+            # Selected tab: a flat highlight the same color as the editor
+            # pane it "belongs to" -- the classic modern-IDE look where the
+            # active tab visually merges with the content below it -- plus
+            # a thin accent-blue underline. No radius: a crisp top-tab edge
+            # reads better here than a fully rounded pill.
+            mut active_bg = 0x0F172A
+            mut accent = 0x3B82F6
+            scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, 0, active_bg, ambient_bg))
+            mut bar_h = 3
+            scene.add(Cmd.rounded_rect(box.x, box.y + box.h - bar_h, box.w, bar_h, 0, accent, active_bg))
+            return active_bg
+
+        if box.tag == tag_listitem():
+            mut selected = self.state_get(box.node_key, b2i(box.w_selected)) != 0
+            mut hovered = box.contains(self.hover_x, self.hover_y)
+            if not selected and not hovered:
+                return ambient_bg
+            # Full-width row highlight -- selected gets a stronger accent
+            # tint, hover-only (not selected) a subtler one. Two flat pre-
+            # muted colors rather than a real alpha blend: execute_software
+            # only honours Cmd alpha on a radius<=0 rect (see its own
+            # comment) -- a rounded, alpha-blended row is a real gap, not
+            # attempted here, so this picks colors that already LOOK like a
+            # blend instead.
+            mut row_bg = 0x1E293B
+            if selected:
+                row_bg = 0x1E3A8A
+            scene.add(Cmd.rounded_rect(box.x, box.y, box.w, box.h, 6, row_bg, ambient_bg))
+            return row_bg
+
+        return ambient_bg
 
     # Builds the scene for the current tree without painting it. Public so a
     # caller can inspect, translate or diff a frame before it is drawn.
@@ -386,6 +613,12 @@ extend Interpreter:
         if e.kind == ev_key():
             name = find_handler_by_event(self.root, 0, wanted)
         else:
+            # Markup-tag widgets (phase 1): mutate widget state BEFORE the
+            # ordinary handler-allowlist lookup below -- a bare `<checkbox/>`
+            # has no `event_name` at all, so hit_test would never find it on
+            # its own, and a tag that DOES also carry `@on_click(...)` should
+            # still get both (the toggle AND the handler) from one click.
+            hit_test_widget(self, self.root, self.root, e.x, e.y, 0)
             name = hit_test(self.root, e.x, e.y, 0, wanted)
         if name == "":
             return false
@@ -413,6 +646,62 @@ def darken_color(color: int, pct: int) -> int:
     mut g = green_of(color) * (100 - pct) / 100
     mut b = blue_of(color) * (100 - pct) / 100
     return rgb(r, g, b)
+
+# Interpreter.state stores ints (Proposal v4 step F -- see the field's own
+# comment for why), but a widget-tag's declared initial value
+# (`LayoutBox.w_checked`/`w_selected`) is a bool -- this is the one-line
+# conversion `emit_widget`'s checkbox/switch/radio branches each need for
+# their very first `state_get` call, spelled out once rather than inlined
+# three times.
+def b2i(b: bool) -> int:
+    if b:
+        return 1
+    return 0
+
+# Checkbox's checkmark, ported to emit `Cmd`s instead of calling
+# `c.fill_rect` directly -- `emit_widget` (an `emit()` helper) must only
+# ever call `scene.add(...)`, never paint straight to a Canvas, the same
+# hard rule every other shape in `emit()` already follows (see toolkit/
+# render/scene.tr's own header on why: painting straight to a Canvas here
+# would defeat diffing/sub-rect rendering for every widget tag). Otherwise
+# byte-identical Bresenham-ish stepper to toolkit/ui/checkbox.tr's
+# `draw_thick_line` -- see that function's own comment for the algorithm;
+# only the one line that used to call `c.fill_rect` differs here, now
+# emitting a same-sized `Cmd.rounded_rect` (radius 0, so it paints as a
+# plain flat-filled square exactly like the original fill_rect did -- see
+# `paint_rounded_rect_aa`'s own r<=0 fallback) at each step instead.
+def emit_thick_line(scene: Scene, x0: int, y0: int, x1: int, y1: int, thick: int, color: int, ambient: int) -> void:
+    mut dx = x1 - x0
+    if dx < 0:
+        dx = 0 - dx
+    mut dy = y1 - y0
+    if dy < 0:
+        dy = 0 - dy
+    mut sx = 1
+    if x0 >= x1:
+        sx = 0 - 1
+    mut sy = 1
+    if y0 >= y1:
+        sy = 0 - 1
+    mut err = dx - dy
+
+    mut cx = x0
+    mut cy = y0
+    mut guard = 0
+    mut max_steps = dx + dy + 4
+    while guard <= max_steps:
+        scene.add(Cmd.rounded_rect(cx - thick / 2, cy - thick / 2, thick, thick, 0, color, ambient))
+        if cx == x1 and cy == y1:
+            guard = max_steps + 1
+        else:
+            mut e2 = err * 2
+            if e2 > 0 - dy:
+                err = err - dy
+                cx = cx + sx
+            if e2 < dx:
+                err = err + dx
+                cy = cy + sy
+            guard = guard + 1
 
 # A rounded rect, built from three plain fills (the straight edges) and four
 # per-pixel quarter-circles (the corners) -- Canvas has no fill-rounded-rect
@@ -952,6 +1241,108 @@ pub def find_handler_by_event(box: LayoutBox, depth: int, wanted_event: str) -> 
         i = i + 1
     return ""
 
+# Markup-tag widgets (phase 1): deepest-first widget-state mutation, parallel
+# to hit_test but distinct from it -- a bare `<checkbox/>` has NO
+# `event_name` at all (no `@on_click(...)` needed for it to work), so
+# hit_test's own event_name match would never find it. `root` is threaded
+# through unchanged at every recursive call (not walked itself here) purely
+# so the radio/tabitem/listitem branches below can reach every OTHER node
+# in the tree once one of them is clicked -- see select_in_group.
+#
+# Same depth-bounded free-function shape as hit_test, for the same reason
+# (see its own comment): safe under --freestanding; a recursive private
+# METHOD returning str is the one that hangs there, and this returns bool
+# and is a free function, so neither trigger applies -- kept the same shape
+# anyway for consistency with the rest of this file's tree-walking helpers.
+pub def hit_test_widget(it: Interpreter, root: LayoutBox, box: LayoutBox, x: int, y: int, depth: int) -> bool:
+    if depth > max_depth():
+        return false
+    if not box.contains(x, y):
+        return false
+
+    mut i = 0
+    while i < len(box.children):
+        if hit_test_widget(it, root, box.children[i], x, y, depth + 1):
+            return true
+        i = i + 1
+
+    if box.tag == tag_checkbox():
+        it.state_toggle(box.node_key, b2i(box.w_checked))
+        return true
+
+    if box.tag == tag_switch():
+        it.state_toggle(box.node_key, b2i(box.w_checked))
+        return true
+
+    if box.tag == tag_radio():
+        select_in_group(it, root, tag_radio(), box)
+        return true
+
+    if box.tag == tag_tabitem():
+        select_in_group(it, root, tag_tabitem(), box)
+        return true
+
+    if box.tag == tag_listitem():
+        select_in_group(it, root, tag_listitem(), box)
+        return true
+
+    if box.tag == tag_slider():
+        # Same hit region Slider.press_inside used: within the thumb's
+        # current pixel position +/- one box-height -- clicking elsewhere on
+        # the track does nothing on its own, matching that widget's own
+        # documented scope (see toolkit/ui/slider.tr's header).
+        mut tm = box.h / 2
+        mut span = box.w_max - box.w_min
+        mut travel = box.w - tm * 2
+        mut value = it.state_get(box.node_key, box.w_value)
+        mut tx = box.x + tm
+        if span > 0 and travel > 0:
+            tx = box.x + tm + travel * (value - box.w_min) / span
+        mut hit_r = box.h
+        if x >= tx - hit_r and x <= tx + hit_r:
+            it.state_set(box.node_key + "#dragging", 1)
+        return true
+
+    return false
+
+# Selects `box` and, if it opted into a group, clears every other node
+# sharing that group -- the one piece of click handling radio/tabitem/
+# listitem all share verbatim, factored out once those three tags all
+# needed it identically (phase 2). Also writes a group-wide convenience
+# key, `"G:" + group` -> `box.w_value`, so host code that needs "which
+# value is active in this group" (e.g. syncing a sidebar file-list
+# selection to a tab strip -- two different TAGS, one conceptual
+# selection) can read one key instead of scanning every member's own
+# bare-node_key state by hand.
+def select_in_group(it: Interpreter, root: LayoutBox, tag: str, box: LayoutBox) -> void:
+    it.state_set(box.node_key, 1)
+    # Ungrouped (no `group-NAME` token) members stay independent, exactly
+    # like a checkbox -- grouping is something an author opts INTO, not a
+    # default every bare tag pays for just by sharing an empty group name
+    # with every other bare one of the same tag in the tree.
+    if box.w_group != "":
+        deselect_group_siblings(it, root, tag, box.w_group, box.node_key, 0)
+        it.state_set("G:" + box.w_group, box.w_value)
+
+# Clears every OTHER node sharing (tag, group) -- the tree-walk counterpart
+# to toolkit/ui/radio.tr's `select_only`, which could only clear a caller-
+# held `List[Radio]` since host-owned radios were never part of one tree to
+# walk in the first place. Whole-tree, not scoped to any one parent,
+# matching how the group name token itself reads (two radios in different
+# panels sharing `group-theme` are still one group). Matched on `tag` AND
+# `group` together, not group alone -- a `<listitem>` click must never
+# clear a `<tabitem>`'s selection even if a caller reused one group name
+# for both (e.g. this file's own "G:active-file" convenience-key pattern).
+def deselect_group_siblings(it: Interpreter, box: LayoutBox, tag: str, group: str, except_key: str, depth: int) -> void:
+    if depth > max_depth():
+        return
+    if box.tag == tag and box.w_group == group and box.node_key != except_key:
+        it.state_set(box.node_key, 0)
+    mut i = 0
+    while i < len(box.children):
+        deselect_group_siblings(it, box.children[i], tag, group, except_key, depth + 1)
+        i = i + 1
+
 # Register a host handler under the name UI content may reference.
 #
 # A free function because a method call does NOT auto-upcast a concrete class to
@@ -998,8 +1389,23 @@ pub def render_diff_to(it: Interpreter, node: Pointer[UiNode], c: Canvas) -> voi
 # Kept in this module rather than in toolkit/render/scene.tr because the
 # primitives live here, and scene.tr must import nothing to stay off the
 # import cycle (Tauraro rejects circular imports).
-pub def execute_software(scene: Scene, c: Canvas, fonts: Fonts) -> void:
-    exec_cmds(scene, 0, c, fonts)
+#
+# Markup-tag widgets (phase 1): `r: Renderer` is new here -- this whole
+# scene-execution path was CPU-only before, bypassing the `Renderer`
+# abstraction every host-painted widget already uses for real GPU/Canvas2D
+# shapes (a gap proposal-v6-renderer-abstraction.md already documented as
+# deferred, not new). `exec_cmds`/`execute_diff` dispatch the two NEW
+# circle/circle_ring Cmd kinds through `r` for that reason -- but
+# `rounded_rect`/`rounded_box` keep calling `paint_rounded_rect_aa`/
+# `paint_rounded_box_aa` directly, UNCHANGED, on purpose: routing every
+# existing panel/button through Renderer too is a strict-superset
+# improvement with a much larger blast radius (every markup node on every
+# backend, not just the widget tags this phase adds), correctly left for a
+# later pass. `r` reaches here via `Interpreter.renderer`, defaulted to
+# `default_renderer()` (SoftwareRenderer) so every existing example keeps
+# its exact current behaviour with zero source changes.
+pub def execute_software(scene: Scene, c: Canvas, fonts: Fonts, r: Renderer) -> void:
+    exec_cmds(scene, 0, c, fonts, r)
 
 # Proposal v4 / nebula1.0 Phase 2 (clipping): processes commands starting at
 # `start`, painting through `active`, until either the list ends or a
@@ -1018,7 +1424,7 @@ pub def execute_software(scene: Scene, c: Canvas, fonts: Fonts) -> void:
 # general), and nesting depth is already bounded by toolkit.ui.ast's
 # max_depth() -- the same cap that bounded how deeply emit() could have
 # nested these pushes to begin with.
-def exec_cmds(scene: Scene, start: int, active: Canvas, fonts: Fonts) -> int:
+def exec_cmds(scene: Scene, start: int, active: Canvas, fonts: Fonts, r: Renderer) -> int:
     mut i = start
     while i < len(scene.cmds):
         mut cmd = scene.cmds[i]
@@ -1042,9 +1448,21 @@ def exec_cmds(scene: Scene, start: int, active: Canvas, fonts: Fonts) -> int:
         elif cmd.kind == cmd_text():
             draw_text(active, fonts.pick(cmd.font_size), cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
             i = i + 1
+        elif cmd.kind == cmd_circle():
+            # Markup-tag widgets (phase 1): routed through Renderer, NOT the
+            # direct paint_X_aa functions rounded_rect/rounded_box still use
+            # above -- see toolkit/ui/interp.tr's own header note on this
+            # deliberate split (only the two NEW shape kinds this phase adds
+            # get Renderer-dispatch; existing panel/button rendering is an
+            # explicitly deferred follow-up, not touched here).
+            r.circle(active, cmd.x, cmd.y, cmd.radius, cmd.fill, cmd.ambient)
+            i = i + 1
+        elif cmd.kind == cmd_circle_ring():
+            r.circle_ring(active, cmd.x, cmd.y, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
+            i = i + 1
         elif cmd.kind == cmd_clip_push():
             mut next_active: Canvas = clip_canvas(active, cmd.x, cmd.y, cmd.w, cmd.h)
-            i = exec_cmds(scene, i + 1, next_active, fonts)
+            i = exec_cmds(scene, i + 1, next_active, fonts, r)
         elif cmd.kind == cmd_clip_pop():
             return i + 1
         else:
@@ -1068,7 +1486,7 @@ def exec_cmds(scene: Scene, start: int, active: Canvas, fonts: Fonts) -> int:
 # Cmd.label() always sets w=0/h=0 (labels aren't boxes), so there's no
 # stored width to clear even if this needed to. Revisit when proposal step F
 # (node identity + state) lands real per-frame-changing text content.
-pub def execute_diff(prev: Scene, curr: Scene, c: Canvas, fonts: Fonts) -> void:
+pub def execute_diff(prev: Scene, curr: Scene, c: Canvas, fonts: Fonts, r: Renderer) -> void:
     mut i = 0
     while i < len(curr.cmds):
         mut cmd = curr.cmds[i]
@@ -1085,4 +1503,8 @@ pub def execute_diff(prev: Scene, curr: Scene, c: Canvas, fonts: Fonts) -> void:
                 paint_rounded_box_aa(c, cmd.x, cmd.y, cmd.w, cmd.h, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
             elif cmd.kind == cmd_text():
                 draw_text(c, fonts.pick(cmd.font_size), cmd.text, cmd.x, cmd.y, cmd.fill, cmd.ambient)
+            elif cmd.kind == cmd_circle():
+                r.circle(c, cmd.x, cmd.y, cmd.radius, cmd.fill, cmd.ambient)
+            elif cmd.kind == cmd_circle_ring():
+                r.circle_ring(c, cmd.x, cmd.y, cmd.radius, cmd.border_w, cmd.fill, cmd.stroke, cmd.ambient)
         i = i + 1

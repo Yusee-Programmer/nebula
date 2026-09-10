@@ -34,10 +34,24 @@
 #   absolute/fixed/z-*   there is no positioning model beyond flex flow.
 #
 # Adding any of those is an engine change first and a token second.
+#
+# ## Reserved for markup-tag widgets, not this file's vocabulary
+#
+# `checked`, `on`, `selected`, `group-NAME`, `min-N`, `max-N`, `value-N` are
+# meaningful only on `<checkbox>`/`<switch>`/`<radio>`/`<slider>`/`<progress>`
+# tags (see toolkit/ui/widget_tags.tr) -- they ride the SAME class string
+# every tag already has, parsed by a completely separate, independent pass
+# (`resolve_widget()` below) into `WidgetTokens`, never into `Style`. This
+# file's own `apply_utility` already ignores them like any other unrecognized
+# token, so there is no runtime collision even if a future Style token
+# happened to reuse one of these prefixes -- noted here so a future reader
+# doesn't wonder whether `min-4` on a `<slider>` means something CSS-`min-`-
+# width-like; it doesn't, Style never sees it as anything.
 
 from toolkit.types import rgb
 from toolkit.ui.palette import color_shade, no_color
 from toolkit.ui.scale import no_px, spacing_px, radius_px, border_px
+from toolkit.ui.widget_tags import WidgetTokens, parse_widget_tokens
 from toolkit.ui.scale import fraction_num, fraction_den, strip_brackets, arbitrary_px
 from string.str import Str
 
@@ -804,6 +818,14 @@ pub class StyleCache:
     pub cache:  Dict[str, Style]
     pub hits:   int
     pub misses: int
+    # Markup-tag widgets (phase 1): a SECOND cache, same key (the raw class
+    # string), same one-parse-per-unique-string cost model as `cache` above
+    # -- kept separate rather than folded into `Style` itself (see this
+    # file's header reservation note) so Style stays exactly what it always
+    # was: 24 fields, purely visual, no widget-config leakage. A class
+    # string with no widget tokens at all just caches an all-defaults
+    # WidgetTokens, at the same cost as caching one with real ones.
+    pub widget_cache: Dict[str, WidgetTokens]
 
 extend StyleCache:
     pub def init() -> StyleCache:
@@ -811,6 +833,7 @@ extend StyleCache:
         sc.cache = {}
         sc.hits = 0
         sc.misses = 0
+        sc.widget_cache = {}
         return sc
 
     # Returns a fresh copy every time. The cached Style is the canonical parse
@@ -832,6 +855,21 @@ extend StyleCache:
 
         self.cache[class_str] = s
         return s.copy()
+
+    # Markup-tag widgets (phase 1): the widget-token counterpart to
+    # resolve() above, same cache-by-raw-string shape, entirely independent
+    # of it (does not read or write `self.cache`, does not affect `hits`/
+    # `misses`) -- see this file's header reservation note and
+    # toolkit/ui/widget_tags.tr's own header for why this is a second parse
+    # of the same string rather than an extension of Style.
+    pub def resolve_widget(self, class_str: str) -> WidgetTokens:
+        if class_str in self.widget_cache:
+            mut cached = self.widget_cache[class_str]
+            return cached.copy()
+
+        mut t = parse_widget_tokens(class_str)
+        self.widget_cache[class_str] = t
+        return t.copy()
 
     pub def stats(self) -> str:
         return "StyleCache(hits=" + self.hits.to_str() + " misses=" + self.misses.to_str() + " unique=" + len(self.cache).to_str() + ")"

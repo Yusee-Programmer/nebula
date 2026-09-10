@@ -1,0 +1,168 @@
+# toolkit.ui.widget_tags — markup-tag widgets (proposal-v6 follow-up,
+# "widgets as tags" phase 1): checkbox/switch/radio/slider/progress.
+#
+# Before this, every stateful widget (Checkbox, Radio, Switch, Slider,
+# ProgressBar, and the rest in toolkit/ui/) was "host-painted" -- a plain
+# class each example constructs, paints, and hit-tests by hand in its own
+# main loop, never part of the parsed markup tree at all. That was never an
+# oversight; it was because mutable state (checked, dragging, scroll offset)
+# had nowhere to live in a tree that gets rebuilt from scratch every frame --
+# see toolkit/ui/interp.tr's own "Proposal v4 step F" comment on
+# `Interpreter.state`/`LayoutBox.node_key`, which shipped 2026-09-08
+# specifically to remove that barrier ("...or a future native widget uses
+# for its own state"). This file is that future widget support, arriving.
+#
+# ## Configuration rides the EXISTING class-string, not a new grammar
+#
+# `toolkit/ui/parser.tr`'s grammar has exactly one class-string and one
+# `@event(handler)` per tag -- no `attr="value"` syntax, and none is added
+# here. Instead, a handful of new space-separated tokens
+# (`checked`/`on`/`selected`/`group-NAME`/`min-N`/`max-N`/`value-N`) ride the
+# SAME class-string every markup tag already carries for visual styling
+# (`<slider "min-0 max-100 value-65 w-full"/>`). `toolkit/ui/style.tr`'s
+# `apply_utility` already silently ignores any token it doesn't recognize
+# (that file's own header/comment, confirmed before this was written) --
+# these tokens are a SEPARATE, independent parse of the SAME string into a
+# DIFFERENT struct, not a Style extension. Style stays exactly what it's
+# always been: 24 fields, purely visual, no widget-config leakage.
+#
+# ## Why five tag names as functions, not magic strings
+#
+# Same convention `toolkit/layout/flex.tr`'s `kind_element()`/`kind_text()`
+# already use -- a typo in a function name is a compile error; a typo in a
+# bare string literal scattered across `emit()`'s tag-dispatch branches is a
+# silent no-op bug found only by noticing a widget never renders.
+
+from string.str import Str
+
+pub def tag_checkbox() -> str:
+    return "checkbox"
+
+pub def tag_switch() -> str:
+    return "switch"
+
+pub def tag_radio() -> str:
+    return "radio"
+
+pub def tag_slider() -> str:
+    return "slider"
+
+pub def tag_progress() -> str:
+    return "progress"
+
+# Phase 2 ("Nebula Studio" IDE demo): unlike the five leaf tags above,
+# these two are CONTAINERS -- a `<tabitem>`/`<listitem>` wraps its own
+# `<text>` label, the same shape `<button>` already has. They reuse radio's
+# exact group-exclusive-selection mechanism (WidgetTokens' `group`/
+# `selected`/`value` fields, unchanged -- no new token parsing needed) but
+# paint as a top tab (background + underline bar) or a full-width sidebar
+# row (highlight fill) instead of a circle+dot. See toolkit/ui/interp.tr's
+# `emit_widget`/`hit_test_widget` for the paint/click logic, and
+# `deselect_group_siblings` for why matching is (tag, group) together, not
+# group alone -- a `<listitem>` click must never clear a `<tabitem>`'s
+# selection even if a caller reused the same group name for both.
+pub def tag_tabitem() -> str:
+    return "tabitem"
+
+pub def tag_listitem() -> str:
+    return "listitem"
+
+# True for any widget tag (phase 1's five leaves plus phase 2's two
+# containers) -- used by dispatch() to decide whether a click needs the
+# widget-state-mutation path at all before falling through to the ordinary
+# handler-allowlist dispatch.
+pub def is_widget_tag(tag: str) -> bool:
+    if tag == tag_checkbox(): return true
+    if tag == tag_switch(): return true
+    if tag == tag_radio(): return true
+    if tag == tag_slider(): return true
+    if tag == tag_progress(): return true
+    if tag == tag_tabitem(): return true
+    if tag == tag_listitem(): return true
+    return false
+
+# Same two one-line helpers toolkit/ui/style.tr's own token parsing uses
+# (`has`/`after`) -- kept as a second, independent copy rather than
+# imported, since importing them would pull in all of style.tr's `Style`
+# machinery for two one-line string helpers this file has no other use for.
+def has(token: str, prefix: str) -> bool:
+    return Str.starts_with(token, prefix)
+
+def after(token: str, prefix: str) -> str:
+    return Str.slice(token, Str.len(prefix), Str.len(token))
+
+pub class WidgetTokens:
+    pub checked:  bool   # "checked" or "on" token present
+    pub selected: bool   # "selected" token present (radio's initial pick)
+    pub group:    str    # "group-NAME" token's NAME, "" if none (radio only)
+    pub min:      int    # "min-N" token's N (slider only, default 0)
+    pub max:      int    # "max-N" token's N (slider only, default 100)
+    pub value:    int    # "value-N" token's N (slider/progress initial value)
+
+extend WidgetTokens:
+    pub def default() -> WidgetTokens:
+        mut t = WidgetTokens()
+        t.checked = false
+        t.selected = false
+        t.group = ""
+        t.min = 0
+        t.max = 100
+        t.value = 0
+        return t
+
+    # Same reason StyleCache.resolve() returns Style.copy() rather than the
+    # cached instance directly: a shared mutable instance would let one
+    # node's (hypothetical, future) mutation bleed into every other node
+    # that happened to share the same class string.
+    pub def copy(self) -> WidgetTokens:
+        mut t = WidgetTokens()
+        t.checked = self.checked
+        t.selected = self.selected
+        t.group = self.group
+        t.min = self.min
+        t.max = self.max
+        t.value = self.value
+        return t
+
+def apply_widget_token(t: WidgetTokens, token: str) -> void:
+    if token == "checked" or token == "on":
+        t.checked = true
+        return
+    if token == "selected":
+        t.selected = true
+        return
+    if has(token, "group-"):
+        t.group = after(token, "group-")
+        return
+    if has(token, "min-"):
+        mut v = after(token, "min-")
+        if Str.is_digit(v):
+            t.min = Str.parse_int(v)
+        return
+    if has(token, "max-"):
+        mut v = after(token, "max-")
+        if Str.is_digit(v):
+            t.max = Str.parse_int(v)
+        return
+    if has(token, "value-"):
+        mut v = after(token, "value-")
+        if Str.is_digit(v):
+            t.value = Str.parse_int(v)
+        return
+
+# Parses every widget-config token out of a class string, ignoring every
+# ordinary Style utility token it also contains (bg-/w-/gap-/flex-row/...) --
+# this is the "second, independent read of the same string" this file's own
+# header describes; nothing here affects, or is affected by, StyleCache's
+# own resolve(). Called from `toolkit/ui/style.tr`'s `StyleCache.
+# resolve_widget(...)`, which caches the result exactly like `resolve()`
+# already caches `Style`, so a class string is never re-split more than once
+# per unique string regardless of how many frames re-render it.
+pub def parse_widget_tokens(class_str: str) -> WidgetTokens:
+    mut t = WidgetTokens.default()
+    mut tokens = Str.split(class_str, " ")
+    mut i = 0
+    while i < len(tokens):
+        apply_widget_token(t, Str.trim(tokens[i]))
+        i = i + 1
+    return t

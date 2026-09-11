@@ -3,7 +3,7 @@
 #   nebula init <name>        scaffold a project
 #   nebula build --<target>   generate + compile
 #   nebula run   --<target>   build, then launch
-#   nebula targets            list platforms
+#   nebula targets             list platforms
 #
 # Written in Tauraro, which was not a foregone conclusion: it needed the
 # stdlib to be able to walk directories and spawn processes, and the plan
@@ -69,19 +69,19 @@ def say(s: str) -> void:
 def fail(s: str) -> void:
     print("error: " + s)
 
-# --- init ------------------------------------------------------------------
+# --- init --------------------------------------------------------------
 
 def scaffold_conf(name: str) -> str:
     mut s = "# nebula.conf -- one key = value per line, # for comments.\n"
     s = s + "name    = " + name + "\n"
     s = s + "width   = 900\n"
     s = s + "height  = 560\n"
-    s = s + "entry   = app/page.ui\n"
-    s = s + "handlers = app/page.tr\n"
+    s = s + "page_dir = app\n"
+    s = s + "pages   = home\n"
     s = s + "bg      = #0F172A\n"
     return s
 
-def scaffold_page_ui() -> str:
+def scaffold_home_nbl() -> str:
     mut s = "# The UI is data. Edit this file and re-run -- on hosted and desktop it is\n"
     s = s + "# read at runtime, so no rebuild is needed. Class strings are Tailwind:\n"
     s = s + "# numbers are scale steps, so p-6 is 24px, not 6px.\n\n"
@@ -101,13 +101,15 @@ def scaffold_page_ui() -> str:
     s = s + "</panel>\n"
     return s
 
-def scaffold_page_tr() -> str:
-    mut s = "# Handlers for app/page.ui.\n"
+def scaffold_home_tr() -> str:
+    mut s = "# Handlers for app/home/home.nbl.\n"
     s = s + "#\n"
     s = s + "# The contract is one function: `register_all(it)`. Nebula never scans this\n"
     s = s + "# file for handler names -- a convention the compiler checks beats a regex\n"
     s = s + "# that guesses -- so anything you want reachable from markup has to be\n"
-    s = s + "# registered here.\n"
+    s = s + "# registered here. A page may also export `on_frame(canvas, w, h, mx, my,\n"
+    s = s + "# buttons, key, wheel)`, called every frame while this page is active, for\n"
+    s = s + "# anything the markup tree alone can't draw (see cli/codegen.tr's header).\n"
     s = s + "#\n"
     s = s + "# A handler is a class implementing EventHandler rather than a function,\n"
     s = s + "# which also gives it somewhere to keep state.\n\n"
@@ -139,15 +141,21 @@ def cmd_init(name: str) -> int:
     root.make()
     mut app = Dir.init(name + "/app")
     app.make()
+    mut home = Dir.init(name + "/app/home")
+    home.make()
 
     File.write_text(name + "/nebula.conf", scaffold_conf(name))
-    File.write_text(name + "/app/page.ui", scaffold_page_ui())
-    File.write_text(name + "/app/page.tr", scaffold_page_tr())
+    File.write_text(name + "/app/home/home.nbl", scaffold_home_nbl())
+    File.write_text(name + "/app/home/home.tr", scaffold_home_tr())
 
     say("created " + name + "/")
     say("  nebula.conf")
-    say("  app/page.ui      the UI, as data")
-    say("  app/page.tr      handlers, via register_all(it)")
+    say("  app/home/home.nbl    the UI, as data")
+    say("  app/home/home.tr     handlers, via register_all(it)")
+    say("")
+    say("add another page: mkdir app/settings, write app/settings/settings.nbl")
+    say("+.tr, then add it to nebula.conf's `pages = home, settings` line and")
+    say("navigate to it (toolkit.ui.router.Router.navigate) from any handler.")
     say("")
     say("next:")
     say("  cd " + name)
@@ -156,29 +164,14 @@ def cmd_init(name: str) -> int:
     say("  nebula run --web        # a browser tab")
     return 0
 
-# --- build -----------------------------------------------------------------
+# --- build ---------------------------------------------------------------
 
-# Writes the generated entry point and returns its path, or "" on failure.
 def emit_entry(cfg: Config, target: int) -> str:
     mut out = Dir.init(".nebula")
     if not out.exists():
         out.make()
 
-    mut markup = ""
-    if is_freestanding(target):
-        # No filesystem on these tiers, so the markup is baked in at build
-        # time rather than read at runtime.
-        markup = File.read_text(cfg.entry)
-        if markup == "":
-            fail("cannot read " + cfg.entry)
-            return ""
-
-    mut has_handlers = false
-    if cfg.handlers != "":
-        if File.read_text(cfg.handlers) != "":
-            has_handlers = true
-
-    mut src = generate(cfg, target, markup, has_handlers)
+    mut src = generate(cfg, target)
     if src == "":
         fail("no generator for target " + target_name(target))
         return ""
@@ -186,34 +179,6 @@ def emit_entry(cfg: Config, target: int) -> str:
     mut path = ".nebula/main.tr"
     File.write_text(path, src)
     return path
-
-# tauraroc always emits its C into ./build, and REUSES whatever is there. A
-# previous build of a different program leaves modules behind that the next
-# one happily compiles and links -- which surfaces either as errors naming
-# types the current program never mentions, or, worse, as a binary that
-# silently runs the PREVIOUS program. Both happened while building this CLI.
-# Dir.remove() will not do it: it does not recurse.
-# Collects every emitted .c, RECURSIVELY. tauraroc puts most modules at the
-# top of build/ but drops std sources under build/include/... -- exactly one
-# file in a typical build, which is enough to fail the link with a pile of
-# undefined StringBuilder_* symbols if the walk is not recursive.
-def collect_c(dir: str, acc: str) -> str:
-    mut d = Dir.init(dir)
-    if not d.exists():
-        return acc
-    mut out = acc
-    mut e = d.list()
-    mut i = 0
-    while i < len(e):
-        mut nm = e[i]
-        mut path = dir + "/" + nm
-        mut n = Str.len(nm)
-        if n > 2 and Str.slice(nm, n - 2, n) == ".c":
-            out = out + " " + path
-        else:
-            out = collect_c(path, out)
-        i = i + 1
-    return out
 
 def clean_build_dir() -> void:
     Process.system("powershell -NoProfile -Command \"Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue\"")
@@ -252,82 +217,193 @@ def build_native(cfg: Config, target: int, entry: str) -> bool:
         cmd = cmd + " --link SDL2.lib"
     return run_cmd("tauraroc", cmd)
 
-# Freestanding wasm, then zig links it. Both flags below are load-bearing and
-# silent when missing: without --freestanding the C compile fails on stdio.h,
-# and without -rdynamic every export is stripped and the host page fails at
-# the first call with "not a function".
+# Freestanding wasm: one tauraroc invocation does it all now -- per-module
+# object caching + a direct wasm-ld link (tauraroc/src/main.tr's
+# compile_wasm_incremental), not a separate `zig build-exe` pass over every
+# generated .c file every time. That older pattern (still visible in git
+# history) reran zig's own build driver from scratch on every build and was
+# measured at 8.8GB peak RSS linking a ~30-file toolkit -- the actual cause
+# of "wasm builds take an hour and time out", not anything about wasm
+# itself. See tauraro's own commit history for the full story.
 def build_web(cfg: Config, entry: str) -> bool:
     clean_build_dir()
-    if not run_cmd("tauraroc", tool("tauraroc.exe") + " " + entry + " --target wasm --freestanding --emit c"):
-        return false
-
-    mut files = collect_c("build", "")
-    if files == "":
-        fail("tauraroc emitted no C sources")
-        return false
-
-    mut cmd = tool("zig/zig.exe") + " build-exe -target wasm32-freestanding -fno-entry -rdynamic"
-    cmd = cmd + " -O ReleaseSmall --export=__heap_base --initial-memory=67108864"
-    cmd = cmd + " --name nebula -femit-bin=.nebula/nebula.wasm"
-    cmd = cmd + " -cflags -w -fno-sanitize=undefined --" + files
-    return run_cmd("zig", cmd)
+    mut wasm = ".nebula/nebula.wasm"
+    # 512MB, not 64: every frame's LayoutBox tree + Scene is currently never
+    # reclaimed (see cli/codegen.tr's gen_web, the comment on why a
+    # per-frame arena release was tried and reverted -- it corrupted
+    # Interpreter.state instead). Until that gets a real two-region
+    # allocator fix, a bigger ceiling is the whole mitigation: 64MB filled
+    # (and hung the tab) in under a minute on a dashboard-sized page; 512MB
+    # buys roughly 8x the session length before the same thing happens.
+    # Costs nothing up front (wasm memory is lazily committed), so there is
+    # no reason to size this any tighter.
+    mut cmd = tool("tauraroc.exe") + " " + entry + " --target wasm --freestanding -Os --wasm-memory 512 -o " + wasm
+    return run_cmd("tauraroc", cmd)
 
 # The host page. Written out beside the .wasm so `nebula run --web` produces
 # something a browser can open with no other files and no bundler.
 #
-# The ABI is the whole reason this is generated rather than hand-written: get
-# one BigInt/Number boundary wrong and the failure is silent or nonsensical.
-# Tauraro `int` and `usize` are BOTH i64 in the wasm ABI -- so they arrive in
-# JS as BigInt, even on wasm32 -- while `Pointer[T]` is i32, a plain Number.
+# Renders through toolkit.render.web.canvas2d_renderer's real Canvas2D calls
+# (js_set_canvas_size/js_fill_rect/js_rounded_rect/js_circle/js_fill_text),
+# not a raw-pixel ImageData blit -- see cli/codegen.tr's gen_web for why.
+# HiDPI-correct: the canvas buffer is sized to CSS-size*devicePixelRatio and
+# the 2D context is scaled to match, or the whole page renders visibly soft
+# on any display with devicePixelRatio > 1 (basically every laptop screen),
+# not just at the edges -- confirmed the hard way building examples/web_ide.
 def host_page(cfg: Config) -> str:
     mut w = cfg.width.to_str()
     mut h = cfg.height.to_str()
     mut s = "<!doctype html>\n<meta charset=\"utf-8\">\n"
     s = s + "<title>" + cfg.name + "</title>\n"
     s = s + "<style>\n"
-    s = s + "  body { margin:0; min-height:100vh; display:grid; place-items:center;\n"
-    s = s + "         background:#020617; color:#94a3b8;\n"
-    s = s + "         font:13px ui-monospace,SFMono-Regular,Menlo,monospace; }\n"
-    s = s + "  canvas { border-radius:12px; box-shadow:0 24px 60px #0008; cursor:none; }\n"
-    s = s + "  #hud { margin-top:12px; opacity:.75 }\n"
+    s = s + "  html, body { margin:0; height:100%; background:" + cfg.bg + ";\n"
+    s = s + "               font:13px ui-monospace,SFMono-Regular,Menlo,monospace; color:#94a3b8; }\n"
+    if cfg.fixed_size:
+        s = s + "  body { display:grid; place-items:center; gap:12px; }\n"
+        s = s + "  canvas { border-radius:12px; box-shadow:0 24px 60px #0008; }\n"
+    else:
+        # nebula1.0 Phase 3: fills the browser window by default (the OLD
+        # centered-fixed-canvas layout is opt-in now, via `fixed_size =
+        # true` in nebula.conf -- see Config.fixed_size's own comment).
+        # overflow:hidden on both stops a 1px scroll-bounce from ever
+        # showing a scrollbar next to a canvas already sized to fill
+        # exactly -- the same reasoning examples/web_ide's own index.html
+        # documents.
+        s = s + "  html, body { width:100%; overflow:hidden; }\n"
+        s = s + "  canvas { display:block; }\n"
+    s = s + "  #hud { opacity:.75; position:fixed; bottom:6px; left:10px; pointer-events:none; }\n"
     s = s + "</style>\n"
-    s = s + "<canvas id=\"c\" width=\"" + w + "\" height=\"" + h + "\"></canvas>\n"
+    s = s + "<canvas id=\"c\" tabindex=\"0\"></canvas>\n"
     s = s + "<div id=\"hud\">loading...</div>\n"
     s = s + "<script type=\"module\">\n"
-    s = s + "const W = " + w + ", H = " + h + ";\n"
+    if cfg.fixed_size:
+        s = s + "let W = " + w + ", H = " + h + ";\n"
+    else:
+        s = s + "let W = window.innerWidth, H = window.innerHeight;\n"
     s = s + "const cv = document.getElementById('c'), ctx = cv.getContext('2d');\n"
-    s = s + "const hud = document.getElementById('hud');\n\n"
-    # Empty import object: the module is freestanding, so it imports nothing.
-    s = s + "const { instance } = await WebAssembly.instantiateStreaming(fetch('nebula.wasm'), {});\n"
-    s = s + "const ex = instance.exports;\n\n"
-    s = s + "// __heap_base is where static data ends; everything above it is ours.\n"
-    s = s + "const heapBase = ex.__heap_base.value ?? ex.__heap_base;\n"
-    s = s + "const total = ex.memory.buffer.byteLength;\n"
-    s = s + "ex.nebula_heap_init(heapBase, BigInt(total - heapBase));\n\n"
-    s = s + "// Pointer[T] is i32 (a Number); int and usize are i64 (BigInt).\n"
-    s = s + "const pixelPtr = Number(ex.nebula_init(BigInt(W), BigInt(H)));\n\n"
-    s = s + "let image = null;\n"
-    s = s + "function refreshView() {\n"
-    s = s + "  const view = new Uint8ClampedArray(ex.memory.buffer, pixelPtr, W * H * 4);\n"
-    s = s + "  image = new ImageData(view, W, H);\n"
+    s = s + "const hud = document.getElementById('hud');\n"
+    s = s + "let mem = null;\n\n"
+    s = s + "function unpack(c) { return [(c>>16)&255, (c>>8)&255, c&255]; }\n\n"
+    # HiDPI fix -- see this function's own header comment. Sizing is
+    # factored into its own function (not run once at the top): a
+    # non-fixed-size page needs to redo this on window resize too, guarded
+    # against redundant reallocation -- js_set_canvas_size fires EVERY
+    # frame (Canvas2DCanvas.init runs inside nebula_frame), and reassigning
+    # cv.width/height unconditionally reallocates the entire backing store
+    # every single time; once the canvas fills the whole window that is a
+    # full-screen GPU buffer realloc 60 times a second, which is exactly
+    # what hung a tab building examples/web_ide earlier this session.
+    s = s + "let lastW = -1, lastH = -1, lastDpr = 0;\n"
+    s = s + "function applyCanvasSize(w, h) {\n"
+    s = s + "  const dpr = window.devicePixelRatio || 1;\n"
+    s = s + "  if (w === lastW && h === lastH && dpr === lastDpr) return;\n"
+    s = s + "  lastW = w; lastH = h; lastDpr = dpr;\n"
+    s = s + "  cv.width = Math.round(w * dpr);\n"
+    s = s + "  cv.height = Math.round(h * dpr);\n"
+    s = s + "  cv.style.width = w + 'px';\n"
+    s = s + "  cv.style.height = h + 'px';\n"
+    s = s + "  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);\n"
     s = s + "}\n"
-    s = s + "refreshView();\n\n"
-    s = s + "let mx = 0, my = 0, buttons = 0, key = 0;\n"
+    s = s + "applyCanvasSize(W, H);\n"
+    if not cfg.fixed_size:
+        s = s + "window.addEventListener('resize', () => {\n"
+        s = s + "  W = window.innerWidth; H = window.innerHeight;\n"
+        s = s + "});\n"
+    s = s + "\n"
+    s = s + "const importObj = { env: {\n"
+    s = s + "  js_set_canvas_size(w, h) { applyCanvasSize(w, h); },\n"
+    s = s + "  js_fill_rect(x, y, w, h, color, alpha) {\n"
+    s = s + "    const [r,g,b] = unpack(color);\n"
+    s = s + "    ctx.fillStyle = alpha >= 255 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha/255})`;\n"
+    s = s + "    ctx.fillRect(x, y, w, h);\n"
+    s = s + "  },\n"
+    s = s + "  js_rounded_rect(x, y, w, h, radius, color) {\n"
+    s = s + "    const [r,g,b] = unpack(color);\n"
+    s = s + "    ctx.fillStyle = `rgb(${r},${g},${b})`;\n"
+    s = s + "    ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.max(0, radius)); ctx.fill();\n"
+    s = s + "  },\n"
+    s = s + "  js_circle(cx, cy, r, color) {\n"
+    s = s + "    const [rr,gg,bb] = unpack(color);\n"
+    s = s + "    ctx.fillStyle = `rgb(${rr},${gg},${bb})`;\n"
+    s = s + "    ctx.beginPath(); ctx.arc(cx, cy, Math.max(0, r), 0, Math.PI*2); ctx.fill();\n"
+    s = s + "  },\n"
+    s = s + "  js_fill_text(ptr, len, x, y, sizePx, color) {\n"
+    s = s + "    const [r,g,b] = unpack(color);\n"
+    s = s + "    const bytes = new Uint8Array(mem.buffer, ptr, len);\n"
+    s = s + "    const text = new TextDecoder().decode(bytes);\n"
+    s = s + "    ctx.fillStyle = `rgb(${r},${g},${b})`;\n"
+    s = s + "    ctx.font = `${sizePx}px ui-monospace,SFMono-Regular,Menlo,monospace`;\n"
+    s = s + "    ctx.textBaseline = 'top';\n"
+    s = s + "    ctx.fillText(text, x, y);\n"
+    s = s + "  },\n"
+    # nebula1.0 Phase 3: real ctx.createLinearGradient + ctx.arc, matching
+    # toolkit/render/web/canvas2d_renderer.tr's js_gradient_rect/js_arc_ring
+    # extern signatures. dir: 0=horizontal, 1=vertical, 2=diagonal --
+    # angle convention for arc_ring: 0 degrees is straight up (12 o'clock),
+    # increasing clockwise (matches toolkit.ui.trig's sin1000/cos1000,
+    # which the CPU-rasterizer path this mirrors uses the same way) --
+    # canvas's own 0-radians is 3-o'clock with clockwise-positive angles in
+    # its y-down coordinate space, hence the `- 90` degree shift below.
+    s = s + "  js_gradient_rect(x, y, w, h, radius, colorA, colorB, dir) {\n"
+    s = s + "    const [ar,ag,ab] = unpack(colorA);\n"
+    s = s + "    const [br,bg,bb] = unpack(colorB);\n"
+    s = s + "    let grad;\n"
+    s = s + "    if (dir === 1) grad = ctx.createLinearGradient(x, y, x, y + h);\n"
+    s = s + "    else if (dir === 2) grad = ctx.createLinearGradient(x, y, x + w, y + h);\n"
+    s = s + "    else grad = ctx.createLinearGradient(x, y, x + w, y);\n"
+    s = s + "    grad.addColorStop(0, `rgb(${ar},${ag},${ab})`);\n"
+    s = s + "    grad.addColorStop(1, `rgb(${br},${bg},${bb})`);\n"
+    s = s + "    ctx.fillStyle = grad;\n"
+    s = s + "    ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.max(0, radius)); ctx.fill();\n"
+    s = s + "  },\n"
+    s = s + "  js_arc_ring(cx, cy, r, ringW, startDeg, sweepDeg, active, track) {\n"
+    s = s + "    const [tr,tg,tb] = unpack(track);\n"
+    s = s + "    const rad = Math.max(1, r - ringW / 2);\n"
+    s = s + "    ctx.lineWidth = Math.max(1, ringW);\n"
+    s = s + "    ctx.lineCap = 'butt';\n"
+    s = s + "    ctx.strokeStyle = `rgb(${tr},${tg},${tb})`;\n"
+    s = s + "    ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.stroke();\n"
+    s = s + "    if (sweepDeg > 0) {\n"
+    s = s + "      const [ar,ag,ab] = unpack(active);\n"
+    s = s + "      const a0 = (startDeg - 90) * Math.PI / 180;\n"
+    s = s + "      const a1 = (startDeg + sweepDeg - 90) * Math.PI / 180;\n"
+    s = s + "      ctx.strokeStyle = `rgb(${ar},${ag},${ab})`;\n"
+    s = s + "      ctx.lineCap = 'round';\n"
+    s = s + "      ctx.beginPath(); ctx.arc(cx, cy, rad, a0, a1, false); ctx.stroke();\n"
+    s = s + "    }\n"
+    s = s + "  },\n"
+    s = s + "}};\n\n"
+    s = s + "const { instance } = await WebAssembly.instantiateStreaming(fetch('nebula.wasm'), importObj);\n"
+    s = s + "const ex = instance.exports;\n"
+    s = s + "mem = ex.memory;\n\n"
+    s = s + "const heapBase = Number(ex.__heap_base.value ?? ex.__heap_base);\n"
+    s = s + "const total = ex.memory.buffer.byteLength;\n"
+    s = s + "ex.nebula_heap_init(heapBase, BigInt(total - heapBase));\n"
+    s = s + "ex.nebula_init(BigInt(W), BigInt(H));\n\n"
+    s = s + "let mx = 0, my = 0, buttons = 0, key = 0, wheel = 0;\n"
     s = s + "cv.addEventListener('mousemove', e => {\n"
     s = s + "  const r = cv.getBoundingClientRect();\n"
-    s = s + "  mx = Math.round((e.clientX - r.left) * W / r.width);\n"
-    s = s + "  my = Math.round((e.clientY - r.top) * H / r.height);\n"
+    s = s + "  mx = Math.round((e.clientX - r.left) * (W / r.width));\n"
+    s = s + "  my = Math.round((e.clientY - r.top) * (H / r.height));\n"
     s = s + "});\n"
-    s = s + "cv.addEventListener('mousedown', () => { buttons = 1; });\n"
+    s = s + "cv.addEventListener('mousedown', () => { buttons = 1; cv.focus(); });\n"
     s = s + "window.addEventListener('mouseup', () => { buttons = 0; });\n"
-    s = s + "window.addEventListener('keydown', e => { key = e.keyCode || 0; });\n\n"
+    s = s + "cv.addEventListener('contextmenu', e => e.preventDefault());\n"
+    s = s + "cv.addEventListener('wheel', e => { e.preventDefault(); wheel = e.deltaY < 0 ? 1 : -1; }, { passive: false });\n\n"
+    # Key-code contract: 8=Backspace 9=Tab 13=Enter 1001..1009=Left/Right/Up/
+    # Down/Home/End/PageUp/PageDown/Delete, 32..126=printable ASCII. A page's
+    # own on_frame handler reads these the same way examples/web_ide's does.
+    s = s + "const KEY_MAP = { Backspace:8, Tab:9, Enter:13, ArrowLeft:1001, ArrowRight:1002,\n"
+    s = s + "  ArrowUp:1003, ArrowDown:1004, Home:1005, End:1006, PageUp:1007, PageDown:1008, Delete:1009 };\n"
+    s = s + "const NAV_KEYS = new Set(Object.keys(KEY_MAP));\n"
+    s = s + "cv.addEventListener('keydown', e => {\n"
+    s = s + "  if (e.ctrlKey || e.metaKey || e.altKey) return;\n"
+    s = s + "  if (NAV_KEYS.has(e.key)) { key = KEY_MAP[e.key]; e.preventDefault(); }\n"
+    s = s + "  else if (e.key.length === 1) { key = e.key.charCodeAt(0); }\n"
+    s = s + "});\n\n"
     s = s + "function frame() {\n"
-    s = s + "  ex.nebula_frame(BigInt(W), BigInt(H), BigInt(mx), BigInt(my), BigInt(buttons), BigInt(key));\n"
-    s = s + "  key = 0;\n"
-    # A grown memory detaches the old ArrayBuffer, which silently makes the
-    # ImageData view unusable. Cheap to check, maddening to debug otherwise.
-    s = s + "  if (image.data.buffer !== ex.memory.buffer) refreshView();\n"
-    s = s + "  ctx.putImageData(image, 0, 0);\n"
+    s = s + "  ex.nebula_frame(BigInt(W), BigInt(H), BigInt(mx), BigInt(my), BigInt(buttons), BigInt(key), BigInt(wheel));\n"
+    s = s + "  key = 0; wheel = 0;\n"
     s = s + "  hud.textContent = ex.nebula_frames() + ' frames - arena ' + ex.nebula_arena_used() + ' bytes';\n"
     s = s + "  requestAnimationFrame(frame);\n"
     s = s + "}\n"

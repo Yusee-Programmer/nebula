@@ -34,6 +34,7 @@
 # silent no-op bug found only by noticing a widget never renders.
 
 from string.str import Str
+from toolkit.ui.style import resolve_color_token, unset
 
 pub def tag_checkbox() -> str:
     return "checkbox"
@@ -67,10 +68,52 @@ pub def tag_tabitem() -> str:
 pub def tag_listitem() -> str:
     return "listitem"
 
-# True for any widget tag (phase 1's five leaves plus phase 2's two
-# containers) -- used by dispatch() to decide whether a click needs the
-# widget-state-mutation path at all before falling through to the ordinary
-# handler-allowlist dispatch.
+# nebula1.0 Phase 3 (dashboard widgets): three more tags, for the shapes a
+# smart-home-style dashboard needs that nothing above covers -- a radial
+# value control, a radial read-only gauge, and a concentric-glow icon
+# button. `dial` is a LEAF like slider (reuses WidgetTokens' min/max/value,
+# no children); `gauge` and `iconring` are CONTAINERS like tabitem/listitem
+# (they paint their own ring/glow as decoration and let an ordinary child --
+# typically a `<text>` or an icon panel -- lay out and center inside them
+# via normal flex measurement, not a special-cased leaf size). See
+# toolkit/ui/interp.tr's emit_widget/hit_test_widget for the paint/click
+# logic and toolkit/layout/flex.tr's widget_intrinsic_w/h /
+# is_measured_widget_tag for why only `dial` is added there.
+pub def tag_dial() -> str:
+    return "dial"
+
+pub def tag_gauge() -> str:
+    return "gauge"
+
+pub def tag_iconring() -> str:
+    return "iconring"
+
+# nebula1.0 Phase 3 (icon support): a LEAF tag painting one of a small
+# curated set of vector glyphs (see toolkit/ui/interp.tr's emit_widget ->
+# paint_icon for the list) instead of a bitmap/font-glyph dependency this
+# toolkit has neither the asset pipeline nor the freestanding-target file
+# access for. `icon-<name>` (parsed into WidgetTokens.name below) picks
+# which one; `text-<color>` (the ordinary Style token every tag already
+# has) tints it, reusing Style.fg rather than inventing a second color
+# token -- an icon is conceptually "colored like text" the same way a
+# glyph would be.
+pub def tag_icon() -> str:
+    return "icon"
+
+# nebula1.0 Phase 3: a real text-input field -- a LEAF like `checkbox`/
+# `dial` (see toolkit/layout/flex.tr's widget_intrinsic_w/h). Reads
+# `placeholder-<text>` for its empty-state hint. Its actual typed content
+# does NOT live in WidgetTokens/LayoutBox at all (a string can't ride the
+# `int`-only w_value the other stateful tags share, and it changes on
+# every keystroke rather than being fixed per class-string like every
+# other widget token) -- see Interpreter.text_state's own comment in
+# toolkit/ui/interp.tr for where it actually lives and why.
+pub def tag_textinput() -> str:
+    return "textinput"
+
+# True for any widget tag -- used by dispatch() to decide whether a click
+# needs the widget-state-mutation path at all before falling through to the
+# ordinary handler-allowlist dispatch.
 pub def is_widget_tag(tag: str) -> bool:
     if tag == tag_checkbox(): return true
     if tag == tag_switch(): return true
@@ -79,6 +122,11 @@ pub def is_widget_tag(tag: str) -> bool:
     if tag == tag_progress(): return true
     if tag == tag_tabitem(): return true
     if tag == tag_listitem(): return true
+    if tag == tag_dial(): return true
+    if tag == tag_gauge(): return true
+    if tag == tag_iconring(): return true
+    if tag == tag_icon(): return true
+    if tag == tag_textinput(): return true
     return false
 
 # Same two one-line helpers toolkit/ui/style.tr's own token parsing uses
@@ -98,6 +146,26 @@ pub class WidgetTokens:
     pub min:      int    # "min-N" token's N (slider only, default 0)
     pub max:      int    # "max-N" token's N (slider only, default 100)
     pub value:    int    # "value-N" token's N (slider/progress initial value)
+    pub name:     str    # "icon-NAME" token's NAME, "" if none (icon only)
+    # "sel-<color>"/"sel-to-<color>" -- tabitem/listitem's SELECTED-state
+    # fill, unset() (no fill, the pre-existing hardcoded look) by default.
+    # A SEPARATE token family from the ordinary `bg-*`/`to-*` Style tokens
+    # on purpose: `bg-*` paints unconditionally (every frame, selected or
+    # not -- see toolkit.ui.style's own apply_color_family_token), and a
+    # themed "selected pill" tab strip needs a fill that only ever shows up
+    # WHILE selected. Reading it here, off WidgetTokens' own independent
+    # parse of the same class string, is what lets `<tabitem
+    # "sel-sky-500 sel-to-blue-600">` skip painting anything at all until
+    # `state_get` says this particular tab is the selected one.
+    pub sel_bg:   int
+    pub sel_bg2:  int
+    # "placeholder-<text>" -- textinput only, shown (muted) while empty and
+    # unfocused. Class-string tokens are split on spaces (see this file's
+    # own `parse_widget_tokens`), so a raw multi-word placeholder can't
+    # survive that split -- `_` stands in for a space in the token itself
+    # (`placeholder-What_are_you_looking_for`) and is decoded back to " "
+    # here, once, at parse time, not on every paint.
+    pub placeholder: str
 
 extend WidgetTokens:
     pub def default() -> WidgetTokens:
@@ -108,6 +176,10 @@ extend WidgetTokens:
         t.min = 0
         t.max = 100
         t.value = 0
+        t.name = ""
+        t.sel_bg = unset()
+        t.sel_bg2 = unset()
+        t.placeholder = ""
         return t
 
     # Same reason StyleCache.resolve() returns Style.copy() rather than the
@@ -122,6 +194,10 @@ extend WidgetTokens:
         t.min = self.min
         t.max = self.max
         t.value = self.value
+        t.name = self.name
+        t.sel_bg = self.sel_bg
+        t.sel_bg2 = self.sel_bg2
+        t.placeholder = self.placeholder
         return t
 
 def apply_widget_token(t: WidgetTokens, token: str) -> void:
@@ -148,6 +224,22 @@ def apply_widget_token(t: WidgetTokens, token: str) -> void:
         mut v = after(token, "value-")
         if Str.is_digit(v):
             t.value = Str.parse_int(v)
+        return
+    if has(token, "icon-"):
+        t.name = after(token, "icon-")
+        return
+    if has(token, "placeholder-"):
+        t.placeholder = Str.replace(after(token, "placeholder-"), "_", " ")
+        return
+    if has(token, "sel-to-"):
+        mut c2 = resolve_color_token(after(token, "sel-to-"))
+        if c2 != unset():
+            t.sel_bg2 = c2
+        return
+    if has(token, "sel-"):
+        mut c1 = resolve_color_token(after(token, "sel-"))
+        if c1 != unset():
+            t.sel_bg = c1
         return
 
 # Parses every widget-config token out of a class string, ignoring every

@@ -71,6 +71,22 @@ pub def cmd_circle() -> int:
 pub def cmd_circle_ring() -> int:
     return 6
 
+# nebula1.0 Phase 3: a two-color rect fill (linear gradient), and a partial
+# ring stroke (radial gauge sweep) -- toolkit.ui.style's Style.bg2/grad_dir
+# and toolkit.ui.widget_tags' dial/gauge tags are what produce these. Both
+# reuse existing Cmd fields rather than adding new ones, same as
+# cmd_circle/cmd_circle_ring already do:
+#   gradient_rect: x/y/w/h/radius as usual, fill=start color, stroke=end
+#     color, border_w=direction (0=horizontal,1=vertical,2=diagonal).
+#   arc_ring: x/y=center, radius=r, border_w=ring width, fill=active
+#     (swept) color, stroke=track (unswept) color, w=start angle in
+#     degrees, h=sweep angle in degrees.
+pub def cmd_gradient_rect() -> int:
+    return 7
+
+pub def cmd_arc_ring() -> int:
+    return 8
+
 pub class Cmd:
     pub kind:     int
     pub x:        int
@@ -181,6 +197,40 @@ extend Cmd:
         c.border_w = ring_w
         c.fill = fill
         c.stroke = ring
+        c.ambient = ambient
+        c.text = ""
+        c.alpha = 255
+        c.font_size = 1
+        return c
+
+    pub def gradient_rect(x: int, y: int, w: int, h: int, radius: int, color_a: int, color_b: int, dir: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_gradient_rect()
+        c.x = x
+        c.y = y
+        c.w = w
+        c.h = h
+        c.radius = radius
+        c.border_w = dir
+        c.fill = color_a
+        c.stroke = color_b
+        c.ambient = ambient
+        c.text = ""
+        c.alpha = 255
+        c.font_size = 1
+        return c
+
+    pub def arc_ring(cx: int, cy: int, r: int, ring_w: int, start_deg: int, sweep_deg: int, active: int, track: int, ambient: int) -> Cmd:
+        mut c = Cmd()
+        c.kind = cmd_arc_ring()
+        c.x = cx
+        c.y = cy
+        c.w = start_deg
+        c.h = sweep_deg
+        c.radius = r
+        c.border_w = ring_w
+        c.fill = active
+        c.stroke = track
         c.ambient = ambient
         c.text = ""
         c.alpha = 255

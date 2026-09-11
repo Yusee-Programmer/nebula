@@ -33,3 +33,11 @@ pub interface Renderer:
     def circle(self, c: Canvas, cx: int, cy: int, r: int, fg: int, bg: int) -> void
     def circle_ring(self, c: Canvas, cx: int, cy: int, r: int, ring_w: int, fill: int, ring: int, ambient: int) -> void
     def text(self, c: Canvas, font: Font, s: str, x: int, y: int, fg: int, bg: int) -> void
+    # nebula1.0 Phase 3: a two-color linear gradient fill (`dir`:
+    # 0=horizontal, 1=vertical, 2=diagonal) and a partial ring stroke (a
+    # radial-gauge sweep, `start_deg`/`sweep_deg` in degrees, `active` the
+    # swept color and `track` the rest of the circumference) -- see
+    # toolkit.ui.interp's paint_gradient_rect_aa/paint_arc_ring_aa for the
+    # default (software) implementation these two are modeled on.
+    def gradient_rect(self, c: Canvas, x: int, y: int, w: int, h: int, radius: int, color_a: int, color_b: int, dir: int, ambient: int) -> void
+    def arc_ring(self, c: Canvas, cx: int, cy: int, r: int, ring_w: int, start_deg: int, sweep_deg: int, active: int, track: int, ambient: int) -> void

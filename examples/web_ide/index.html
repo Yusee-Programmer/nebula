@@ -1,41 +1,82 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>Nebula Code</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1120">
+<link rel="manifest" href="manifest.json">
 <style>
-  html, body { margin: 0; height: 100%; background: #0b1120;
+  /* Full-bleed, edge-to-edge -- no page chrome around the canvas at all, so
+     the app reads as its own window rather than content embedded in a page.
+     overflow:hidden on both stops a 1px scroll-bounce from ever showing a
+     scrollbar next to a canvas that's already sized to fill exactly. */
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%;
+               overflow: hidden; background: #0b1120;
                font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: #94a3b8; }
-  body { display: grid; place-items: center; gap: 12px; }
-  canvas { display: block; border-radius: 8px; cursor: text; }
-  #err { color: #f87171; max-width: 900px; white-space: pre-wrap; }
+  canvas { display: block; }
+  #err { position: fixed; bottom: 8px; left: 8px; color: #f87171;
+         max-width: 900px; white-space: pre-wrap; font-size: 12px; z-index: 10; }
 </style>
 
-<canvas id="screen" width="1100" height="700" tabindex="0"></canvas>
-<div id="status">loading nebula.wasm…</div>
+<canvas id="screen" tabindex="0"></canvas>
 <div id="err"></div>
 
 <script type="module">
 // Host side of examples/web_ide. Same Canvas2D JS-import contract as every
 // other *_web example (see examples/ide_demo_web's own index.html for the
 // fuller per-function commentary on the drawing calls, not repeated here).
-// The one thing this page adds beyond that baseline: a richer keydown map,
-// since this app is a real multi-line editor and needs arrow keys/Home/End/
-// PageUp/PageDown/Delete/Tab, not just Backspace/Enter -- see main.tr's own
-// key_*() functions for the exact code contract this must match.
+// Beyond that baseline, this page adds: a richer keydown map (arrow keys/
+// Home/End/PageUp/PageDown/Delete/Tab -- see main.tr's key_*() functions
+// for the exact code contract), HiDPI-correct canvas sizing, live window
+// resize, and a cursor-shape bridge (see nebula_cursor_kind below).
 const cv = document.getElementById('screen');
 const ctx = cv.getContext('2d');
-const status = document.getElementById('status');
 
 function unpack(color) {
   return [(color >> 16) & 255, (color >> 8) & 255, color & 255];
 }
 
 let mem = null;
+// The blur/"foggy" look was the classic HTML5-canvas HiDPI bug: on a display
+// with devicePixelRatio > 1 (basically every laptop screen now), a canvas
+// whose PIXEL BUFFER (width/height attributes) matches its CSS display size
+// 1:1 has fewer buffer pixels than the physical screen pixels it's stretched
+// across, so the browser upscales the whole bitmap to fill them -- blurring
+// EVERYTHING uniformly (text, fills, rects), not just edges. The fix: size
+// the buffer to CSS-size * devicePixelRatio, keep the CSS size (style.width/
+// height) at the LOGICAL size, and scale the 2D context so every existing
+// draw call (still issued in logical coordinates by the wasm side) lands on
+// the right physical pixels.
+let logicalW = window.innerWidth, logicalH = window.innerHeight;
+let lastDpr = 0;
+function applyCanvasSize(w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  // js_set_canvas_size is called every single frame (Canvas2DCanvas.init
+  // runs inside nebula_frame), not just on real resizes -- assigning
+  // cv.width/height REALLOCATES THE ENTIRE BACKING STORE every time, even
+  // to the same value. At the old fixed 1100x700 that was wasteful but
+  // survivable; once the canvas fills the whole window (this page's own
+  // resize-to-fill change) that's a full-screen-sized GPU buffer realloc
+  // 60 times a second, which is exactly what was hanging the tab ("not
+  // responding"). Skip the expensive part entirely unless the logical size
+  // or devicePixelRatio actually changed since last time.
+  if (w === logicalW && h === logicalH && dpr === lastDpr) return;
+  logicalW = w;
+  logicalH = h;
+  lastDpr = dpr;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  cv.style.width = w + 'px';
+  cv.style.height = h + 'px';
+  // setTransform (not scale): called every time the SIZE genuinely changes,
+  // and scale() would compound onto whatever transform is already active --
+  // setTransform always replaces it outright.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
 
 const importObj = {
   env: {
     js_set_canvas_size(w, h) {
-      cv.width = w;
-      cv.height = h;
+      applyCanvasSize(w, h);
     },
     js_fill_rect(x, y, w, h, color, alpha) {
       const [r, g, b] = unpack(color);
@@ -77,15 +118,26 @@ try {
   const total = ex.memory.buffer.byteLength;
   ex.nebula_heap_init(heapBase, BigInt(total - heapBase));
 
-  const W = cv.width, H = cv.height;
+  // W/H track the actual browser window -- ElectronJS-style fill-the-window
+  // behavior, not a fixed canvas size. main.tr's own layout math (sidebar_w/
+  // editor_x/etc) already recomputes every frame from whatever width/height
+  // nebula_frame is called with, so resizing needs nothing on the wasm side
+  // beyond passing the current size in -- this page just has to track it.
+  let W = window.innerWidth, H = window.innerHeight;
+  window.addEventListener('resize', () => {
+    W = window.innerWidth;
+    H = window.innerHeight;
+  });
   ex.nebula_init(BigInt(W), BigInt(H));
 
   let mx = 0, my = 0, buttons = 0, key = 0, wheel = 0;
-  const scale = () => cv.width / cv.getBoundingClientRect().width;
+  // LOGICAL coordinates (the wasm side's whole world is 0..logicalW /
+  // 0..logicalH) -- NOT cv.width/cv.height, which are now the DPI-scaled
+  // physical buffer size and would put every click off by devicePixelRatio.
   cv.addEventListener('mousemove', e => {
-    const r = cv.getBoundingClientRect(), s = scale();
-    mx = Math.round((e.clientX - r.left) * s);
-    my = Math.round((e.clientY - r.top) * s);
+    const r = cv.getBoundingClientRect();
+    mx = Math.round((e.clientX - r.left) * (logicalW / r.width));
+    my = Math.round((e.clientY - r.top) * (logicalH / r.height));
   });
   cv.addEventListener('mousedown', () => { buttons = 1; cv.focus(); });
   window.addEventListener('mouseup', () => { buttons = 0; });
@@ -118,20 +170,25 @@ try {
     }
   });
 
+  // main.tr computes what's under the mouse every frame (it already knows
+  // its own chrome layout for click routing) and exposes it here rather
+  // than this page guessing at pixel rects independently -- 0=default,
+  // 1=pointer (title bar/menu/tabs/sidebar), 2=text (the editor pane).
+  const CURSOR_STYLES = ['default', 'pointer', 'text'];
+  let lastCursor = -1;
   function frame() {
     ex.nebula_frame(BigInt(W), BigInt(H), BigInt(mx), BigInt(my), BigInt(buttons), BigInt(key), BigInt(wheel));
     key = 0;
     wheel = 0;
+    const kind = Number(ex.nebula_cursor_kind());
+    if (kind !== lastCursor) {
+      cv.style.cursor = CURSOR_STYLES[kind] || 'default';
+      lastCursor = kind;
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
-
-  status.textContent = 'Nebula Code -- click the canvas, then type. Click a file to switch.';
-  setInterval(() => {
-    status.textContent = `${ex.nebula_frames()} frames -- Nebula Code`;
-  }, 2000);
 } catch (e) {
-  status.textContent = 'failed to start';
   document.getElementById('err').textContent = e.stack || String(e);
 }
 </script>

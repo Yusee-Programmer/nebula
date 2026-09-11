@@ -54,6 +54,7 @@ from toolkit.ui.component import instantiate, one_slot, no_props
 from toolkit.ui.ast import UiNode, box_node
 from toolkit.ui.menubar import MenuBar
 from toolkit.render.web.canvas2d_renderer import Canvas2DCanvas, canvas2d_renderer_of
+from toolkit.render.renderer import Renderer
 from toolkit.platform.arena import arena_init, arena_alloc, arena_realloc, arena_calloc
 from toolkit.text.font import Font
 from string.str import Str
@@ -101,12 +102,20 @@ def key_delete() -> int: return 1009
 # the markup below: h-9 = 36px, h-7 = 28px -- see toolkit.layout.flex's own
 # "numbers are scale steps, N*4px" note) ------------------------------
 def menu_h() -> int: return 36
-def tabstrip_h() -> int: return 36
+# Measured empirically (click-position scan against the real layout tree),
+# not derived from "h-9 = 9*4 = 36px" -- the tab strip actually renders at
+# 72px, double the naive scale-step math. Whatever combination of
+# items-end/tabitem's own h-9/row auto-sizing produces that isn't traced
+# further here; matching the REAL rendered position is what keeps the
+# hand-painted editor pane/hover-highlight/cursor-kind from overlapping the
+# tree's own real chrome, regardless of why the toolkit renders it that way.
+def tabstrip_h() -> int: return 72
 def statusbar_h() -> int: return 28
 def sidebar_w() -> int: return 200
 
+def chrome_top() -> int: return 0
 def editor_x() -> int: return sidebar_w()
-def editor_y() -> int: return menu_h() + tabstrip_h()
+def editor_y() -> int: return chrome_top() + menu_h() + tabstrip_h()
 def content_h(total_h: int) -> int:
     return total_h - editor_y() - statusbar_h()
 def status_y(total_h: int) -> int:
@@ -431,10 +440,28 @@ mut _it:         Interpreter = Interpreter.init()
 mut _tree:       Pointer[UiNode] = 0 as Pointer[UiNode]
 mut _buffers:    List[Buffer] = []
 mut _font:       Font = Font.load()
-mut _mb:         MenuBar = MenuBar.init([], [], [])
+mut _mb:         MenuBar = MenuBar.init(["File"], [1], ["Loading..."])
 mut _dark:       bool = true
 mut _toast:      str = ""
 mut _toast_ttl:  int = 0
+mut _cursor_kind: int = 0
+
+# 0=default arrow, 1=pointer (clickable chrome), 2=text (I-beam, editable).
+# The host page has no idea what's under the mouse -- it only forwards raw
+# mouse_x/mouse_y in -- so this app computes it from the same layout
+# constants nebula_frame's own click routing already uses, and index.html
+# polls nebula_cursor_kind() once per frame to set the real CSS cursor.
+def compute_cursor_kind(mx: int, my: int, total_h: int) -> int:
+    if my < chrome_top():
+        return 0
+    elif my < editor_y():
+        return 1
+    elif my >= status_y(total_h):
+        return 0
+    elif mx < editor_x():
+        return 1
+    else:
+        return 2
 
 def seed_files() -> List[Buffer]:
     mut bufs: List[Buffer] = []
@@ -573,6 +600,9 @@ pub export def nebula_init(width: int, height: int) -> void:
 pub export def nebula_frames() -> int:
     return _frames
 
+pub export def nebula_cursor_kind() -> int:
+    return _cursor_kind
+
 pub export def nebula_arena_used() -> int:
     return 0
 
@@ -639,6 +669,27 @@ pub def render_editor(canvas: Canvas2DCanvas, buf: Buffer, x: int, y: int, w: in
         py = py + ch
         row = row + 1
 
+# A subtle highlight behind whichever sidebar row the mouse is over --
+# computed from the same fixed geometry build_shell_tree's own markup uses
+# (p-2 padding, h-8 rows, gap-1 between them: 8/32/4px), not introspected
+# from the layout tree, same "known constants" approach as editor_x()/
+# editor_y() above. The sidebar's own listitem widgets already handle
+# click/selected-state visuals; this only adds hover feedback, which
+# tabitem/listitem don't get from the tree renderer on their own.
+pub def render_sidebar_hover(canvas: Canvas2DCanvas, mx: int, my: int, total_h: int):
+    if mx < 0 or mx >= sidebar_w(): return
+    if my < editor_y() or my >= status_y(total_h): return
+    mut row_h = 32
+    mut pad = 8
+    mut rel_y = my - editor_y() - pad
+    if rel_y < 0: return
+    mut stride = row_h + 4
+    mut row = rel_y / stride
+    if row < 0 or row >= len(_buffers): return
+    if rel_y - row * stride >= row_h: return
+    mut ry = editor_y() + pad + row * stride
+    canvas.fill_rect_alpha(pad, ry, sidebar_w() - pad * 2, row_h, 0xFFFFFF, 18)
+
 pub def render_status_bar(canvas: Canvas2DCanvas, buf: Buffer, x: int, y: int, w: int, h: int):
     canvas.fill_rect(x, y, w, h, theme_status_bg())
     mut ch = _font.cell_h()
@@ -654,8 +705,16 @@ pub def render_status_bar(canvas: Canvas2DCanvas, buf: Buffer, x: int, y: int, w
     if _toast_ttl > 0:
         mut toast_w = Str.len(_toast) * _font.cell_w() + 24
         mut toast_x = x + w / 2 - toast_w / 2
-        canvas.fill_rect(toast_x, y - h - 8, toast_w, h, 0x2563EB)
-        canvas.text(canvas, _font, _toast, toast_x + 12, y - h - 8 + (h - ch) / 2, 0xFFFFFF, 0x2563EB)
+        mut toast_y = y - h - 8
+        # Fade in over the first 15 ticks, hold, fade out over the last 25 --
+        # a canvas redraws from scratch every frame, so "transition" here
+        # just means computing an alpha from the remaining ttl, not a CSS
+        # transition on anything persistent.
+        mut alpha = 255
+        if _toast_ttl < 25: alpha = _toast_ttl * 255 / 25
+        elif _toast_ttl > 75: alpha = (90 - _toast_ttl) * 255 / 15
+        canvas.fill_rect_alpha(toast_x, toast_y, toast_w, h, 0x2563EB, alpha)
+        canvas.text(canvas, _font, _toast, toast_x + 12, toast_y + (h - ch) / 2, 0xFFFFFF, 0x2563EB)
 
 pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int, buttons: int, key: int, wheel_delta: int) -> void:
     _frames = _frames + 1
@@ -666,13 +725,28 @@ pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int,
     mut canvas = Canvas2DCanvas.init(width, height)
     canvas.clear(theme_editor_bg())
 
+    _cursor_kind = compute_cursor_kind(mouse_x, mouse_y, height)
+
+    # By default an Interpreter/MenuBar paints its tree through
+    # SoftwareRenderer -- a CPU rasterizer using a small baked bitmap font
+    # with per-pixel coverage blending (see toolkit.text.font's own header).
+    # That's correct and portable, but visibly softer than the browser's own
+    # vector font rasterizer -- next to this editor's hand-painted pane
+    # (which already calls Canvas2DCanvas.text -> real ctx.fillText), the
+    # difference reads as "half the UI is blurry". Point both at the native
+    # Canvas2D renderer instead so every layer -- menu bar, tab strip,
+    # sidebar, editor -- shares the same crisp text path.
+    mut renderer: Renderer = canvas2d_renderer_of(canvas)
+    _it.renderer = renderer
+    _mb.renderer = renderer
+
     mut active = active_index()
     if active < 0 or active >= len(_buffers): active = 0
     mut buf = _buffers[active]
 
     mut menu_consumed = false
     if clicked:
-        if _mb.click_inside(mouse_x, mouse_y, 0, 0, width, menu_h()):
+        if _mb.click_inside(mouse_x, mouse_y, 0, chrome_top(), width, menu_h()):
             menu_consumed = true
             if _mb.clicked_menu == 0 and _mb.clicked_item == 0:
                 buf.modified = false
@@ -686,10 +760,10 @@ pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int,
                 show_toast("Theme: " + bool_theme_name())
             elif _mb.clicked_menu == 3:
                 show_toast("Nebula Code -- built with Tauraro + nebula")
-    _mb.hover_at(mouse_x, mouse_y, 0, 0, width, menu_h())
+    _mb.hover_at(mouse_x, mouse_y, 0, chrome_top(), width, menu_h())
 
     if clicked and not menu_consumed:
-        _it.dispatch(Event.click(mouse_x, mouse_y - menu_h()))
+        _it.dispatch(Event.click(mouse_x, mouse_y - chrome_top() - menu_h()))
         mut new_active = active_index()
         if new_active >= 0 and new_active < len(_buffers):
             active = new_active
@@ -703,10 +777,10 @@ pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int,
             buf.click_to_cursor(mouse_x - ex - gutter_w - 8, mouse_y - ey, _font.cell_w(), _font.cell_h())
 
     _it.hover_x = mouse_x
-    _it.hover_y = mouse_y - menu_h()
+    _it.hover_y = mouse_y - chrome_top() - menu_h()
     _it.pressed = pressed
     _it.mouse_x = mouse_x
-    _it.mouse_y = mouse_y - menu_h()
+    _it.mouse_y = mouse_y - chrome_top() - menu_h()
 
     mut i = 0
     while i < len(_buffers):
@@ -735,10 +809,12 @@ pub export def nebula_frame(width: int, height: int, mouse_x: int, mouse_y: int,
             buf.scroll_row = buf.scroll_row - wheel_delta * 3
             if buf.scroll_row < 0: buf.scroll_row = 0
 
-    render_into(_it, _tree, canvas, 0, menu_h(), width, height - menu_h(), theme_editor_bg())
+    mut tree_y = chrome_top() + menu_h()
+    render_into(_it, _tree, canvas, 0, tree_y, width, height - tree_y, theme_editor_bg())
     render_editor(canvas, buf, editor_x(), editor_y(), width - editor_x(), content_h(height), (_frames / 30) % 2 == 0)
+    render_sidebar_hover(canvas, mouse_x, mouse_y, height)
     render_status_bar(canvas, buf, 0, status_y(height), width, statusbar_h())
-    _mb.paint(canvas, 0, 0, width, menu_h())
+    _mb.paint(canvas, 0, chrome_top(), width, menu_h())
 
     if _toast_ttl > 0: _toast_ttl = _toast_ttl - 1
 

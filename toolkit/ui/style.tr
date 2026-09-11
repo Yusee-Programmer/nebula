@@ -138,6 +138,15 @@ pub class Style:
     pub gap_y:    int
     pub w:        int
     pub h:        int
+    # nebula1.0 Phase 3 (gradients): a second background color -- unset() (the
+    # same sentinel `bg` already uses) means "no gradient, `bg` is a flat
+    # fill", exactly like `border`'s own unset()-means-none convention. Only
+    # meaningful when `bg` is ALSO set: `bg` is the gradient's start color,
+    # `bg2` its end color. See `grad_dir` for the axis.
+    pub bg2:      int
+    # 0 = horizontal (left->right), 1 = vertical (top->bottom), 2 = diagonal
+    # (top-left->bottom-right). Meaningless unless `bg2` is set.
+    pub grad_dir: int
     # Fractional sizing (`w-1/2`, `w-full`), kept as numerator/denominator and
     # resolved against the parent's content box at layout time. Denominator 0
     # means "not set" -- see toolkit.ui.scale for why this is a fraction and
@@ -172,6 +181,13 @@ pub class Style:
     # background/border are NOT clipped by this, only its CHILDREN -- same
     # as CSS). See toolkit/render/clipped_canvas.tr for the mechanism.
     pub clip: bool
+    # nebula1.0 Phase 3: `shadow` -- a soft drop shadow behind this box's own
+    # fill, the "elevated card" look. See toolkit.ui.interp's emit() for the
+    # actual paint (a few offset, increasingly pale solid rounded_rects,
+    # not a real blur -- there is no alpha-blended-rounded-shape primitive
+    # on the CPU path yet, see Style.opacity_pct's own note on that same
+    # gap, so this fakes softness with flat layers instead).
+    pub shadow: bool
     # nebula1.0 Phase 2: `opacity-N` (0-100, tailwind-style percent, NOT
     # this file's usual 4x spacing scale -- opacity has no natural "unit"
     # to scale). 100 = fully opaque, the default. Only honoured for a
@@ -205,6 +221,8 @@ extend Style:
         s.gap_y    = 0
         s.w        = unset()
         s.h        = unset()
+        s.bg2      = unset()
+        s.grad_dir = 0
         s.w_num    = 0
         s.w_den    = 0
         s.h_num    = 0
@@ -220,6 +238,7 @@ extend Style:
         s.grid_cols = 0
         s.key      = ""
         s.clip     = false
+        s.shadow   = false
         s.opacity_pct = 100
         s.font_size = font_size_base()
         return s
@@ -239,6 +258,8 @@ extend Style:
         s.gap_y    = self.gap_y
         s.w        = self.w
         s.h        = self.h
+        s.bg2      = self.bg2
+        s.grad_dir = self.grad_dir
         s.w_num    = self.w_num
         s.w_den    = self.w_den
         s.h_num    = self.h_num
@@ -254,12 +275,13 @@ extend Style:
         s.grid_cols = self.grid_cols
         s.key      = self.key
         s.clip     = self.clip
+        s.shadow   = self.shadow
         s.opacity_pct = self.opacity_pct
         s.font_size = self.font_size
         return s
 
     pub def to_str(self) -> str:
-        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + " grid_cols=" + self.grid_cols.to_str() + " key=" + self.key + " clip=" + self.clip.to_str() + " opacity_pct=" + self.opacity_pct.to_str() + " font_size=" + self.font_size.to_str() + ")"
+        return "Style(dir=" + self.dir.to_str() + " pad=" + self.pad_t.to_str() + "," + self.pad_r.to_str() + "," + self.pad_b.to_str() + "," + self.pad_l.to_str() + " gap=" + self.gap_x.to_str() + "/" + self.gap_y.to_str() + " w=" + self.w.to_str() + " h=" + self.h.to_str() + " grow=" + self.grow.to_str() + " bg=" + self.bg.to_str() + " bg2=" + self.bg2.to_str() + " grad_dir=" + self.grad_dir.to_str() + " border=" + self.border.to_str() + " bw=" + self.border_w.to_str() + " radius=" + self.radius.to_str() + " justify=" + self.justify.to_str() + " align=" + self.align.to_str() + " grid_cols=" + self.grid_cols.to_str() + " key=" + self.key + " clip=" + self.clip.to_str() + " shadow=" + self.shadow.to_str() + " opacity_pct=" + self.opacity_pct.to_str() + " font_size=" + self.font_size.to_str() + ")"
 
 def hex_digit_val(c: str) -> int:
     if c == "0": return 0
@@ -416,6 +438,13 @@ def apply_key_token(s: Style, token: str) -> bool:
 def apply_clip_token(s: Style, token: str) -> bool:
     if token == "clip":
         s.clip = true
+        return true
+    return false
+
+# nebula1.0 Phase 3: `shadow` -- see Style.shadow's own field comment.
+def apply_shadow_token(s: Style, token: str) -> bool:
+    if token == "shadow":
+        s.shadow = true
         return true
     return false
 
@@ -768,6 +797,31 @@ def apply_color_family_token(s: Style, token: str) -> bool:
         return true
     return false
 
+# nebula1.0 Phase 3 (gradients): `to-<color>` sets the gradient's end color
+# (`bg-<color>` is already its start), `bg-gradient-r`/`-b`/`-br` picks the
+# axis. A separate function rather than folded into apply_color_family_token,
+# same __chkstk stack-frame-size reason apply_grid_token/apply_key_token
+# already are their own functions (this file's header above apply_flex_token
+# explains the rule). A panel only actually gradient-fills once `bg2` is set
+# AND `bg` (the start color) is also set -- see toolkit.ui.interp's emit(),
+# which checks `bg2 != unset()` before ever reading `grad_dir`.
+def apply_gradient_token(s: Style, token: str) -> bool:
+    if has(token, "to-"):
+        mut c = resolve_color_token(after(token, "to-"))
+        if c != unset():
+            s.bg2 = c
+        return true
+    if token == "bg-gradient-r":
+        s.grad_dir = 0
+        return true
+    if token == "bg-gradient-b":
+        s.grad_dir = 1
+        return true
+    if token == "bg-gradient-br":
+        s.grad_dir = 2
+        return true
+    return false
+
 # Apply one utility token to a style, in place. Unknown tokens are ignored
 # rather than fatal: UI content can arrive from outside the build, and a typo
 # in a class string must never be able to halt the renderer. See this file's
@@ -796,7 +850,11 @@ pub def apply_utility(s: Style, token: str) -> void:
 
     if apply_key_token(s, token):
         return
+    if apply_gradient_token(s, token):
+        return
     if apply_clip_token(s, token):
+        return
+    if apply_shadow_token(s, token):
         return
     if apply_opacity_token(s, token):
         return
@@ -814,6 +872,60 @@ pub def apply_utility(s: Style, token: str) -> void:
         return
     if apply_color_family_token(s, token):
         return
+
+# nebula1.0 Phase 3 (responsive breakpoints): the same 3 numbers Tailwind
+# itself uses, so the mental model transfers exactly for anyone who's used
+# it -- `sm:`/`md:`/`lg:` prefix ANY existing utility token
+# (`md:flex-row`) and it only applies once the viewport is at least that
+# wide (mobile-first, matching Tailwind's own `min-width` semantics: a
+# `md:` token stays active at `lg` widths too).
+pub def breakpoint_sm() -> int:
+    return 640
+
+pub def breakpoint_md() -> int:
+    return 1024
+
+pub def breakpoint_lg() -> int:
+    return 1440
+
+# Which of the 3 thresholds `viewport_w` clears, as a single small int --
+# NOT the raw pixel width. This is the responsive StyleCache's actual
+# cache-bucket key: two viewport widths that clear the exact same set of
+# thresholds resolve every class string identically, so bucketing by tier
+# (0..3) rather than by the live pixel width is what keeps a window resize
+# from missing the cache on every single pixel of movement -- only an
+# actual breakpoint CROSSING invalidates anything.
+pub def viewport_tier(viewport_w: int) -> int:
+    if viewport_w >= breakpoint_lg():
+        return 3
+    if viewport_w >= breakpoint_md():
+        return 2
+    if viewport_w >= breakpoint_sm():
+        return 1
+    return 0
+
+# The responsive entry point `StyleCache.resolve` calls per token, instead
+# of `apply_utility` directly. Strips a recognized breakpoint prefix and
+# only forwards the REST of the token to the ordinary `apply_utility`
+# dispatch chain if the current viewport clears that breakpoint -- every
+# existing non-prefixed utility token is unaffected (falls straight
+# through to the same `apply_utility` call it always got), and every
+# token gains responsive behavior for free with no per-token duplication.
+pub def apply_utility_responsive(s: Style, token: str, viewport_w: int) -> void:
+    if has(token, "sm:"):
+        if viewport_w >= breakpoint_sm():
+            apply_utility(s, after(token, "sm:"))
+        return
+    if has(token, "md:"):
+        if viewport_w >= breakpoint_md():
+            apply_utility(s, after(token, "md:"))
+        return
+    if has(token, "lg:"):
+        if viewport_w >= breakpoint_lg():
+            apply_utility(s, after(token, "lg:"))
+        return
+    apply_utility(s, token)
+
 pub class StyleCache:
     pub cache:  Dict[str, Style]
     pub hits:   int
@@ -839,10 +951,23 @@ extend StyleCache:
     # Returns a fresh copy every time. The cached Style is the canonical parse
     # of that class string; handing callers the shared instance would let one
     # node's layout mutate every other node that used the same classes.
-    pub def resolve(self, class_str: str) -> Style:
-        if class_str in self.cache:
+    #
+    # nebula1.0 Phase 3 (responsive breakpoints): `viewport_w` is the live
+    # canvas width this frame's layout_tree() was called with -- the cache
+    # key becomes `class_str + "@" + tier`, not `class_str` alone, since
+    # the SAME class string (`md:flex-row`) now resolves DIFFERENTLY
+    # depending on viewport width. `viewport_tier` buckets by which
+    # breakpoints are cleared, not the raw pixel width, so a live window
+    # resize only misses the cache on an actual breakpoint crossing, not
+    # every frame. A class string with no `sm:`/`md:`/`lg:` tokens at all
+    # resolves identically at every tier -- costs one extra Dict entry per
+    # tier it's actually seen at (up to 4), not a cache-hit-rate regression
+    # for markup that never uses the feature.
+    pub def resolve(self, class_str: str, viewport_w: int) -> Style:
+        mut key = class_str + "@" + viewport_tier(viewport_w).to_str()
+        if key in self.cache:
             self.hits = self.hits + 1
-            mut cached = self.cache[class_str]
+            mut cached = self.cache[key]
             return cached.copy()
 
         self.misses = self.misses + 1
@@ -850,10 +975,10 @@ extend StyleCache:
         mut tokens = Str.split(class_str, " ")
         mut i = 0
         while i < len(tokens):
-            apply_utility(s, Str.trim(tokens[i]))
+            apply_utility_responsive(s, Str.trim(tokens[i]), viewport_w)
             i = i + 1
 
-        self.cache[class_str] = s
+        self.cache[key] = s
         return s.copy()
 
     # Markup-tag widgets (phase 1): the widget-token counterpart to

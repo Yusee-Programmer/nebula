@@ -18,8 +18,8 @@
 #   place   — top-down positioning and grow distribution
 
 from toolkit.ui.ast import UiNode, read_node, max_depth
-from toolkit.ui.style import Style, StyleCache, dir_col, dir_grid
-from toolkit.ui.widget_tags import tag_checkbox, tag_switch, tag_radio, tag_slider, tag_progress
+from toolkit.ui.style import Style, StyleCache, dir_col, dir_grid, unset
+from toolkit.ui.widget_tags import tag_checkbox, tag_switch, tag_radio, tag_slider, tag_progress, tag_dial, tag_icon, tag_textinput
 from toolkit.ui.style import align_stretch, align_center, align_end, align_between
 from toolkit.ui.style import align_around, align_evenly
 from toolkit.ui.style import font_size_sm, font_size_lg
@@ -96,6 +96,10 @@ pub class LayoutBox:
     pub w_min:      int
     pub w_max:      int
     pub w_value:    int
+    pub w_name:     str
+    pub w_sel_bg:   int
+    pub w_sel_bg2:  int
+    pub w_placeholder: str
 
 extend LayoutBox:
     pub def init(kind: int, tag: str, text: str, event_name: str, handler: str, style: Style) -> LayoutBox:
@@ -118,6 +122,10 @@ extend LayoutBox:
         b.w_min = 0
         b.w_max = 100
         b.w_value = 0
+        b.w_name = ""
+        b.w_sel_bg = unset()
+        b.w_sel_bg2 = unset()
+        b.w_placeholder = ""
         return b
 
     pub def contains(self, px: int, py: int) -> bool:
@@ -149,11 +157,11 @@ extend LayoutBox:
 # keys use, so the two schemes can never collide by accident). That is the
 # escape hatch for a reordering list: position changes when an item moves,
 # an explicit key does not.
-pub def build(node: Pointer[UiNode], cache: StyleCache, depth: int, path: str) -> LayoutBox:
+pub def build(node: Pointer[UiNode], cache: StyleCache, depth: int, path: str, viewport_w: int) -> LayoutBox:
     mut n = read_node(node)
     match n:
         case UiNode.Element(tag, cls, evt, handler, kids):
-            mut st = cache.resolve(cls)
+            mut st = cache.resolve(cls, viewport_w)
             mut box = LayoutBox.init(kind_element(), tag, "", evt, handler, st)
             if st.key != "":
                 box.node_key = "K:" + st.key
@@ -174,14 +182,18 @@ pub def build(node: Pointer[UiNode], cache: StyleCache, depth: int, path: str) -
             box.w_min = wt.min
             box.w_max = wt.max
             box.w_value = wt.value
+            box.w_name = wt.name
+            box.w_sel_bg = wt.sel_bg
+            box.w_sel_bg2 = wt.sel_bg2
+            box.w_placeholder = wt.placeholder
             if depth < max_depth():
                 mut i = 0
                 while i < len(kids):
-                    box.children.append(build(kids[i], cache, depth + 1, path + "." + i.to_str()))
+                    box.children.append(build(kids[i], cache, depth + 1, path + "." + i.to_str(), viewport_w))
                     i = i + 1
             return box
         case UiNode.Text(cls, value):
-            mut st2 = cache.resolve(cls)
+            mut st2 = cache.resolve(cls, viewport_w)
             mut tbox = LayoutBox.init(kind_text(), "text", value, "", "", st2)
             if st2.key != "":
                 tbox.node_key = "K:" + st2.key
@@ -235,6 +247,11 @@ def widget_intrinsic_w(tag: str) -> int:
     if tag == tag_checkbox(): return 20
     if tag == tag_radio(): return 18
     if tag == tag_switch(): return 48
+    # dial is a small fixed-size radial control, same "both dimensions
+    # default" reasoning as checkbox/radio/switch just above -- see this
+    # function's own header comment.
+    if tag == tag_dial(): return 96
+    if tag == tag_icon(): return 24
     return 0
 
 def widget_intrinsic_h(tag: str) -> int:
@@ -243,6 +260,12 @@ def widget_intrinsic_h(tag: str) -> int:
     if tag == tag_switch(): return 26
     if tag == tag_slider(): return 24
     if tag == tag_progress(): return 10
+    if tag == tag_dial(): return 96
+    if tag == tag_icon(): return 24
+    # textinput: height-only default (a sensible row height), same
+    # "leave WIDTH at 0" reasoning as slider/progress above -- an author
+    # sizes it with `grow`/`w-full` like anything else.
+    if tag == tag_textinput(): return 36
     return 0
 
 def is_measured_widget_tag(tag: str) -> bool:
@@ -251,6 +274,9 @@ def is_measured_widget_tag(tag: str) -> bool:
     if tag == tag_switch(): return true
     if tag == tag_slider(): return true
     if tag == tag_progress(): return true
+    if tag == tag_dial(): return true
+    if tag == tag_icon(): return true
+    if tag == tag_textinput(): return true
     return false
 
 pub def measure(box: LayoutBox) -> void:
@@ -578,7 +604,7 @@ pub def layout_tree(node: Pointer[UiNode], cache: StyleCache, vw: int, vh: int) 
 # matters because hit-testing walks this same tree, so shifting the painted
 # output afterwards instead would have left dispatch() testing the wrong space.
 pub def layout_tree_at(node: Pointer[UiNode], cache: StyleCache, x: int, y: int, vw: int, vh: int) -> LayoutBox:
-    mut root = build(node, cache, 0, "0")
+    mut root = build(node, cache, 0, "0", vw)
     measure(root)
     # The root fills the given box unless it asked for a specific size.
     if root.style.w < 0:

@@ -74,7 +74,14 @@ $wasm = Join-Path $out "nebula.wasm"
 & $tauraroc $srcFull --target wasm --freestanding "-O$Opt" --wasm-memory $MemoryMB -o $wasm
 if ($LASTEXITCODE -ne 0) { throw "tauraroc failed (exit $LASTEXITCODE)" }
 
-Copy-Item (Join-Path (Split-Path $srcFull) "index.html") $out -Force -ErrorAction SilentlyContinue
+# Copy every host-page asset next to main.tr, not just index.html -- a web
+# app can have a manifest.json/icons/CSS/etc. of its own (examples/web_ide
+# does, for real PWA-installable-standalone-window support). Everything
+# except the .tr source itself and this script's own output files.
+$srcDir = Split-Path $srcFull
+Get-ChildItem $srcDir -File | Where-Object { $_.Extension -ne ".tr" } | ForEach-Object {
+    Copy-Item $_.FullName $out -Force
+}
 
 Write-Host ""
 Write-Host "built $wasm" -ForegroundColor Green

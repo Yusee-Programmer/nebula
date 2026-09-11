@@ -1,27 +1,26 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Nebula Canvas2D — modern browser UI</title>
+<title>Nebula Code</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0b1120;
                font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: #94a3b8; }
   body { display: grid; place-items: center; gap: 12px; }
-  canvas { display: block; border-radius: 8px; cursor: default; }
-  #err { color: #f87171; max-width: 720px; white-space: pre-wrap; }
+  canvas { display: block; border-radius: 8px; cursor: text; }
+  #err { color: #f87171; max-width: 900px; white-space: pre-wrap; }
 </style>
 
-<canvas id="screen" width="700" height="680"></canvas>
+<canvas id="screen" width="1100" height="700" tabindex="0"></canvas>
 <div id="status">loading nebula.wasm…</div>
 <div id="err"></div>
 
 <script type="module">
-// The host side of the Canvas2D backend (proposal-v6 phase 3).
-//
-// Unlike examples/web_demo/index.html (WebCanvas: a shared raw pixel buffer,
-// zero imports), this page IS the JS glue contract: every shape/text call
-// crosses straight into a real ctx.roundRect/arc/fillText call here, so the
-// module IMPORTS these under `env` instead of only exporting frame/init
-// functions. Confirmed via `WebAssembly.Module.imports(module)` during
-// development -- exactly `[{module:"env", name:"js_rounded_rect", ...}, ...]`.
+// Host side of examples/web_ide. Same Canvas2D JS-import contract as every
+// other *_web example (see examples/ide_demo_web's own index.html for the
+// fuller per-function commentary on the drawing calls, not repeated here).
+// The one thing this page adds beyond that baseline: a richer keydown map,
+// since this app is a real multi-line editor and needs arrow keys/Home/End/
+// PageUp/PageDown/Delete/Tab, not just Backspace/Enter -- see main.tr's own
+// key_*() functions for the exact code contract this must match.
 const cv = document.getElementById('screen');
 const ctx = cv.getContext('2d');
 const status = document.getElementById('status');
@@ -57,9 +56,6 @@ const importObj = {
       ctx.arc(cx, cy, Math.max(0, r), 0, Math.PI * 2);
       ctx.fill();
     },
-    // `ptr`/`len` are plain i32 Numbers (Pointer[T]/c_int both cross the
-    // wasm ABI that way -- see canvas2d_renderer.tr's own header on why
-    // every extern here uses c_int, never Tauraro's own 64-bit `int`).
     js_fill_text(ptr, len, x, y, sizePx, color) {
       const [r, g, b] = unpack(color);
       const bytes = new Uint8Array(mem.buffer, ptr, len);
@@ -77,8 +73,6 @@ try {
   const ex = instance.exports;
   mem = ex.memory;
 
-  // __heap_base is where static data ends -- handing the arena everything
-  // above it is how the host gives Nebula memory without guessing an address.
   const heapBase = Number(ex.__heap_base.value ?? ex.__heap_base);
   const total = ex.memory.buffer.byteLength;
   ex.nebula_heap_init(heapBase, BigInt(total - heapBase));
@@ -93,34 +87,49 @@ try {
     mx = Math.round((e.clientX - r.left) * s);
     my = Math.round((e.clientY - r.top) * s);
   });
-  cv.addEventListener('mousedown', () => { buttons = 1; });
+  cv.addEventListener('mousedown', () => { buttons = 1; cv.focus(); });
   window.addEventListener('mouseup', () => { buttons = 0; });
   cv.addEventListener('contextmenu', e => e.preventDefault());
-  // positive = up / scroll-toward-start, the same convention every desktop
-  // tier's own wheel handling already uses (SdlCanvas.last_wheel_delta()).
   cv.addEventListener('wheel', e => {
     e.preventDefault();
     wheel = e.deltaY < 0 ? 1 : -1;
   }, { passive: false });
-  window.addEventListener('keydown', e => {
-    if (e.key.length === 1) key = e.key.charCodeAt(0);
-    else if (e.key === 'Backspace') key = 8;
-    else if (e.key === 'Enter') key = 13;
+
+  // Key-code contract, matches main.tr's key_*() functions exactly:
+  //   8=Backspace 9=Tab 13=Enter
+  //   1001=Left 1002=Right 1003=Up 1004=Down
+  //   1005=Home 1006=End 1007=PageUp 1008=PageDown 1009=Delete
+  //   32..126 = printable ASCII (single character keys only)
+  const KEY_MAP = {
+    Backspace: 8, Tab: 9, Enter: 13,
+    ArrowLeft: 1001, ArrowRight: 1002, ArrowUp: 1003, ArrowDown: 1004,
+    Home: 1005, End: 1006, PageUp: 1007, PageDown: 1008, Delete: 1009,
+  };
+  const NAV_KEYS = new Set(Object.keys(KEY_MAP));
+  cv.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return; // leave browser/OS shortcuts alone
+    if (NAV_KEYS.has(e.key)) {
+      key = KEY_MAP[e.key];
+      e.preventDefault(); // Tab/arrows/PageUp must not move page focus or scroll
+    } else if (e.key.length === 1) {
+      key = e.key.charCodeAt(0);
+    } else {
+      return;
+    }
   });
 
   function frame() {
     ex.nebula_frame(BigInt(W), BigInt(H), BigInt(mx), BigInt(my), BigInt(buttons), BigInt(key), BigInt(wheel));
-    key = 0;      // one-shot per frame
-    wheel = 0;    // one-shot per frame
+    key = 0;
+    wheel = 0;
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
+  status.textContent = 'Nebula Code -- click the canvas, then type. Click a file to switch.';
   setInterval(() => {
-    status.textContent =
-      `${ex.nebula_frames()} frames · arena ${ex.nebula_arena_used()} bytes · ` +
-      `Canvas2D renderer (proposal-v6 phase 3) -- real browser antialiasing + text`;
-  }, 500);
+    status.textContent = `${ex.nebula_frames()} frames -- Nebula Code`;
+  }, 2000);
 } catch (e) {
   status.textContent = 'failed to start';
   document.getElementById('err').textContent = e.stack || String(e);
